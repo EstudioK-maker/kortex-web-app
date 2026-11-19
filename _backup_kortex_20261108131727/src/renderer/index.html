@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <title>Kortex</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="app">
+  <header id="titlebar" class="titlebar">
+    <div class="tab-strip" id="tab-strip"></div>
+    <div class="window-controls">
+      <button class="window-btn" id="win-minimize"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
+      <button class="window-btn" id="win-maximize"><svg viewBox="0 0 12 12"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1"/></svg></button>
+      <button class="window-btn window-btn--close" id="win-close"><svg viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg></button>
+    </div>
+  </header>
+
+  <div class="window-frame">
+    <div class="toolbar" id="toolbar">
+      <div class="nav-controls">
+        <button class="icon-btn" id="btn-back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+        <button class="icon-btn" id="btn-forward"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+        <button class="icon-btn" id="btn-reload"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg></button>
+      </div>
+
+      <div class="url-bar" id="url-bar">
+        <svg class="url-bar__lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        <input class="url-bar__input" id="url-input" type="text" placeholder="Pesquisa ou escreve um endereço" spellcheck="false">
+        <div id="url-suggestions" class="url-suggestions"></div>
+      </div>
+
+      <div class="toolbar-actions">
+        <button class="icon-btn" id="btn-private" title="Navegação Privada"><svg viewBox="0 0 24 24"><path d="M5 11a7 7 0 0 1 14 0v9l-3-2-2 2-2-2-2 2-2-2-3 2v-9z"/><circle cx="9.5" cy="11" r=".8"/><circle cx="14.5" cy="11" r=".8"/></svg></button>
+        <button class="icon-btn" id="btn-extensions" title="Extensões"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13v7M13 16.5h7"/></svg></button>
+        <span class="toolbar-divider"></span>
+        <button class="btn-assistant" id="btn-assistant">
+          <svg viewBox="0 0 24 24"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 17h-8l-5 4v-4H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 5z"/></svg>
+          <span>Assistente</span>
+        </button>
+        <button class="profile-btn" id="btn-profile">K</button>
+      </div>
+    </div>
+
+    <div class="workspace">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar__top">
+          <div class="brand-mark"><svg viewBox="0 0 32 32"><path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/></svg></div>
+          <div class="sidebar__top-actions">
+            <button class="icon-btn icon-btn--sm" id="btn-toggle-sidebar" title="Esconder"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/></svg></button>
+          </div>
+        </div>
+        <nav class="sidebar__nav">
+          <a class="nav-item" href="javascript:void(0)" onclick="window.kortex.tabs.navigate('current', 'about:blank')"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>Novo chat</span></a>
+          <a class="nav-item" href="javascript:void(0)" onclick="window.kortex.tabs.navigate('current', 'kortex://plugins')"><svg viewBox="0 0 24 24"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0V7zM12 16v5"/></svg><span>Plugins</span></a>
+          <a class="nav-item" href="javascript:void(0)" onclick="window.kortex.tabs.navigate('current', 'kortex://history')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span>Histórico</span></a>
+          <a class="nav-item" href="javascript:void(0)" onclick="window.kortex.tabs.navigate('current', 'kortex://extensions')"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13v7M13 16.5h7"/></svg><span>Extensões</span></a>
+        </nav>
+        <div class="sidebar__scroll">
+          <section class="sidebar-section" id="sidebar-recents-container">
+            <button class="sidebar-section__head"><span>Recentes</span></button>
+            <div id="recent-list"></div>
+          </section>
+        </div>
+        <div class="sidebar__footer">
+          <button class="user-card" id="user-card" onclick="window.kortex.tabs.navigate('current', 'kortex://settings')">
+            <span class="avatar">K</span>
+            <span class="user-card__info"><span class="user-card__name">Kanha</span></span>
+          </button>
+        </div>
+      </aside>
+
+      <main id="main-content" class="main-content">
+        <div id="page-host" class="page-host">
+          <section id="home-view" class="home-view">
+            <svg class="home-logo" viewBox="0 0 32 32"><path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/></svg>
+            <h1 class="greeting">Olá, <span id="greeting-name">Kanha</span></h1>
+            <form class="chat-input" id="home-chat-input" onsubmit="event.preventDefault();">
+              <textarea class="chat-input__field" id="home-chat-field" rows="2" placeholder="Escreve @ para conetores"></textarea>
+              <div class="chat-input__bar">
+                <div class="chat-input__tools">
+                  <button type="button" class="icon-btn icon-btn--sm" id="home-attach"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+                  <div class="segmented">
+                    <button type="button" class="segmented__item is-active" id="home-web-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg><span>Pesquisa</span></button>
+                    <button type="button" class="segmented__item" id="home-agent"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6M12 16v4"/></svg><span>Agente</span></button>
+                  </div>
+                </div>
+                <div class="chat-input__actions">
+                  <button type="button" class="model-select"><span>Sonnet 3.5</span></button>
+                  <button type="submit" class="send-btn" id="home-send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <aside id="assistant-panel" class="assistant-panel">
+          <header class="assistant-panel__header">
+            <h2 class="assistant-panel__title">Assistente</h2>
+            <button class="icon-btn icon-btn--sm" id="assistant-close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          </header>
+          <div class="assistant-panel__body" id="assistant-messages-box">
+            <svg class="empty-chat-icon" viewBox="0 0 48 48"><path d="M8 11a4 4 0 0 1 4-4h24a4 4 0 0 1 4 4v18a4 4 0 0 1-4 4H22l-8 7v-7h-2a4 4 0 0 1-4-4V11z"/></svg>
+          </div>
+          <form class="chat-input chat-input--compact" id="assistant-chat-input" onsubmit="event.preventDefault();">
+            <textarea class="chat-input__field" id="assistant-chat-field" rows="1" placeholder="Pergunta sobre esta página"></textarea>
+            <div class="chat-input__bar">
+              <div class="chat-input__actions">
+                <button type="submit" class="send-btn" id="assistant-send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+              </div>
+            </div>
+          </form>
+        </aside>
+      </main>
+    </div>
+  </div>
+</div>
+<script src="js/app.js"></script>
+<script src="js/chat.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kortex — O navegador do futuro</title>
+  <style>
+    :root { --bg: #1a1b1d; --surface: #232427; --text: #e9e9eb; --muted: #9a9aa1; --accent: #ff5722; --accent-hover: #ff6d40; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 20px;
+    }
+    .logo { width: 80px; height: 80px; margin-bottom: 24px; color: var(--accent); }
+    h1 { font-size: 42px; font-weight: 600; margin-bottom: 12px; letter-spacing: -0.02em; }
+    p { font-size: 18px; color: var(--muted); max-width: 500px; line-height: 1.5; margin-bottom: 40px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      padding: 16px 32px;
+      border-radius: 12px;
+      font-size: 18px;
+      font-weight: 600;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn:hover { background: var(--accent-hover); transform: translateY(-2px); }
+    .btn:active { transform: translateY(0); }
+    .btn svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .info { margin-top: 30px; font-size: 13px; color: var(--muted); background: var(--surface); padding: 12px 24px; border-radius: 8px; border: 1px solid #38393d; }
+  </style>
+</head>
+<body>
+  <svg class="logo" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/>
+  </svg>
+  <h1>Kortex Browser</h1>
+  <p>Kortex combina IA nativa, bloqueio inteligente de anúncios e um motor leve numa interface que desaparece quando não precisas dela.</p>
+  <a href="https://github.com/d66807617-sketch/kortex/releases/download/1.0.3/Kortex.Setup.1.0.4.exe" class="btn" download>
+    <svg viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>
+    Baixar agora
+  </a>
+  <div class="info">
+    Versão Beta 1.0.4 &bull; O essencial já funciona
+  </div>
+</body>
+</html>

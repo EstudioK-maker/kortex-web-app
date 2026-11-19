@@ -1,0 +1,25 @@
+﻿@import url('settings.css');
+.ext-header { display: flex; justify-content: space-between; align-items: center; padding: 30px; border-bottom: 1px solid var(--border-color); }
+.ext-header h1 { font-size: 24px; font-weight: 600; color: #fff; }
+.ext-actions { display: flex; align-items: center; gap: 10px; }
+.dev-label { font-size: 13px; color: var(--text-muted); }
+#dev-toolbar { padding: 20px 30px; border-bottom: 1px solid var(--border-color); display: flex; gap: 10px; align-items: center; }
+.btn-primary { background: var(--accent-color); color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 500; }
+.btn-secondary { background: transparent; color: #fff; border: 1px solid var(--border-strong); padding: 10px 20px; border-radius: 8px; cursor: pointer; }
+.hint { font-size: 12px; color: var(--text-faint); }
+.ext-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; padding: 30px; }
+.ext-card { background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; }
+.ext-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+.ext-card-title { font-size: 16px; font-weight: 600; color: #fff; }
+.ext-card-version { font-size: 12px; color: var(--text-muted); }
+.ext-card-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 15px; flex: 1; word-break: break-all; }
+.ext-card-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.btn-remove { background: transparent; border: 1px solid rgba(255, 107, 98, 0.4); color: var(--danger); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.btn-remove:hover { background: rgba(255, 107, 98, 0.1); }
+/* Toggle Switch */
+.toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 34px; }
+.slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+input:checked + .slider { background-color: var(--accent-color); }
+input:checked + .slider:before { transform: translateX(18px); }

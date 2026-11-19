@@ -1,0 +1,649 @@
+﻿// src/main/main.js â€” processo principal do Kortex.
+const { app, nativeTheme, BaseWindow, WebContentsView, ipcMain, session, protocol, BrowserWindow, dialog, shell } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { ElectronChromeExtensions } = require('electron-chrome-extensions');
+const AdmZip = require('adm-zip');
+
+const googleCompat = require('./google-compat');
+const defaultBrowser = require('./default-browser');
+const updater = require('./updater');
+const settings = require('./settings');
+const secrets = require('./secrets');
+const extMenu = require('./extensions-menu');
+const features = require('./features');
+const pro = require('./browser-features');
+const ai = require('./ai');
+const webstore = require('./webstore-install');
+const widevine = require('./widevine');
+const extCompat = require('./ext-compat');
+const googleAccounts = require('./google-accounts');
+const googleApps = require('./google-apps');
+
+const RENDERER_DIR = path.join(__dirname, '../renderer');
+const PAGES_DIR = path.join(RENDERER_DIR, 'pages');
+const PRELOAD = path.join(__dirname, '../preload/preload.js');
+const WEBVIEW_PRELOAD = path.join(__dirname, '../preload/webview-preload.js');
+const USER_AGENT = googleCompat.UA;
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'kortex', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+
+app.commandLine.appendSwitch('disable-features', 'WebContentsForceDark,WebAuthentication,WebAuthenticationPasskeys,WebAuthenticationCableV2,WebAuthenticationConditionalUI');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-usermedia-screen-capturing');
+app.commandLine.appendSwitch('allow-http-screen-capture');
+app.setName('Kortex');
+
+const historyPath = path.join(app.getPath('userData'), 'history.json');
+const configPath = path.join(app.getPath('userData'), 'kortex-config.json');
+let mainWindow, chromeView, overlayView, suggestView, extMenuView, ext;
+const pageViews = {};
+const suspended = {};
+const lastActiveAt = {};
+const TAB_SUSPEND_MS = 30 * 60 * 1000;
+let suspendTimer = null;
+let activeTabId = null;
+let tabCounter = 0;
+let pageBounds = null;
+let pendingUrl = null;
+let uiReady = false;
+
+let savedExtensions = [];
+const extensionsJsonPath = path.join(app.getPath('userData'), 'extensions.json');
+try { if (fs.existsSync(extensionsJsonPath)) savedExtensions = JSON.parse(fs.readFileSync(extensionsJsonPath, 'utf8')); } catch (e) {}
+
+let disabledExtensions = [];
+const disabledExtPath = path.join(app.getPath('userData'), 'disabledExtensions.json');
+try { if (fs.existsSync(disabledExtPath)) disabledExtensions = JSON.parse(fs.readFileSync(disabledExtPath, 'utf8')); } catch (e) {}
+
+const normalizePath = (p) => { try { return path.normalize(p).toLowerCase(); } catch (e) { return String(p).toLowerCase(); } };
+const nav = (wc) => wc.navigationHistory || wc;
+
+function toast(msg) {
+  try { if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('toast', msg); } catch (e) {}
+}
+
+const KORTEX_PAGES = {
+  settings: 'settings.html', extensions: 'extensions.html', store: 'store.html', plugins: 'plugins.html',
+  history: 'library.html', bookmarks: 'library.html', downloads: 'library.html',
+  permissions: 'permissions.html', certerror: 'certerror.html'
+};
+const KORTEX_TITLES = {
+  store: 'Loja do Kortex', extensions: 'ExtensÃµes', settings: 'DefiniÃ§Ãµes', plugins: 'Plugins',
+  history: 'HistÃ³rico', bookmarks: 'Marcadores', downloads: 'TransferÃªncias',
+  permissions: 'PermissÃµes dos sites', certerror: 'LigaÃ§Ã£o nÃ£o privada'
+};
+const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
+
+function handleKortexRequest(request) {
+  const notFound = () => new Response('Not found', { status: 404 });
+  let url, rel;
+  try { url = new URL(request.url); rel = decodeURIComponent(url.pathname).replace(/^\/+/, ''); } catch (e) { return notFound(); }
+  const page = KORTEX_PAGES[url.hostname];
+  if (!page) return notFound();
+  if (!rel) rel = page;
+  const filePath = path.resolve(PAGES_DIR, rel);
+  if (!filePath.startsWith(PAGES_DIR + path.sep) || !fs.existsSync(filePath)) return notFound();
+  return new Response(fs.readFileSync(filePath), { headers: { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-store' } });
+}
+
+const internalTitle = (url) => { try { return KORTEX_TITLES[new URL(url).hostname] || 'Kortex'; } catch (e) { return 'Kortex'; } };
+
+function createWindow() {
+  // O fundo da JANELA Ã© escuro
+  mainWindow = new BaseWindow({ width: 1400, height: 900, frame: false, titleBarStyle: 'hidden', backgroundColor: '#0f1011' });
+  mainWindow.maximize();
+
+  chromeView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  chromeView.setBackgroundColor('#00000000');
+  mainWindow.contentView.addChildView(chromeView);
+  pro.attach(chromeView.webContents);
+  chromeView.setBounds({ x: 0, y: 0, width: 1400, height: 900 });
+  chromeView.webContents.loadFile(path.join(RENDERER_DIR, fs.existsSync(configPath) ? 'index.html' : 'setup.html'));
+
+  overlayView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  overlayView.setBackgroundColor('#00000000');
+  overlayView.setVisible(false);
+  overlayView.webContents.loadFile(path.join(RENDERER_DIR, 'overlay.html'));
+
+  suggestView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  suggestView.setBackgroundColor('#00000000');
+  suggestView.setVisible(false);
+  suggestView.webContents.loadFile(path.join(RENDERER_DIR, 'suggestions.html'));
+
+  extMenuView = extMenu.create({
+    getMainWindow: () => mainWindow, getChromeView: () => chromeView, raise: () => raiseOverlays(),
+    isDisabled: (p) => disabledExtensions.some((d) => normalizePath(d) === normalizePath(p)),
+    navigateActive: (url) => navigateActive(url), toast: (msg) => toast(msg)
+  }, PRELOAD, path.join(RENDERER_DIR, 'extensions-menu.html'));
+
+  raiseOverlays();
+  fitOverlaysToWindow();
+
+  let startupDone = false;
+  chromeView.webContents.on('did-finish-load', () => {
+    if (startupDone || !fs.existsSync(configPath)) return;
+    startupDone = true;
+    const urls = settings.get('startup.mode') === 'continue' ? features.readSessionTabs() : [];
+    const startupUrl = pendingUrl || defaultBrowser.urlFromArgv(process.argv);
+    pendingUrl = null;
+    if (startupUrl) createNewTab(startupUrl);
+    else if (urls.length) urls.forEach((u) => createNewTab(u));
+    else createNewTab();
+    uiReady = true;
+  });
+  mainWindow.on('close', () => features.saveSessionTabs(() => pageViews));
+
+  const handleResize = () => { fitOverlaysToWindow(); hideSuggestions(); extMenu.hide(); };
+  mainWindow.on('resize', handleResize);
+  mainWindow.on('maximize', () => setTimeout(handleResize, 50));
+  mainWindow.on('unmaximize', () => setTimeout(handleResize, 50));
+  mainWindow.on('restore', () => setTimeout(handleResize, 50));
+}
+
+function fitOverlaysToWindow() {
+  if (!mainWindow) return;
+  const { width, height } = mainWindow.getContentBounds();
+  chromeView.setBounds({ x: 0, y: 0, width, height });
+  overlayView.setBounds({ x: 0, y: 0, width, height });
+}
+
+function raiseOverlays() {
+  mainWindow.contentView.addChildView(suggestView);
+  mainWindow.contentView.addChildView(extMenuView);
+  mainWindow.contentView.addChildView(overlayView);
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, commandLine) => {
+    const url = defaultBrowser.urlFromArgv(commandLine);
+    if (!mainWindow) { pendingUrl = url; return; }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    openFromOS(url);
+  });
+}
+
+function openFromOS(url) {
+  if (!url) return;
+  const v = pageViews[activeTabId];
+  if (!v) createNewTab(url);
+  else {
+    const cur = v.webContents.getURL();
+    if (cur === '' || cur === 'about:blank') navigateActive(url);
+    else createNewTab(url);
+  }
+}
+
+const INTERNAL_SCHEMES = new Set(['http', 'https', 'kortex', 'about', 'blob', 'data', 'javascript', 'view-source', 'file', 'filesystem', 'chrome', 'chrome-extension', 'devtools', 'ws', 'wss']);
+function schemeOf(u) {
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(String(u || '').trim());
+  return m ? m[1].toLowerCase() : '';
+}
+const isInternalUrl = (u) => INTERNAL_SCHEMES.has(schemeOf(u));
+
+const lastExternal = new Map();
+function openExternalUrl(url) {
+  const scheme = schemeOf(url);
+  if (!scheme || isInternalUrl(url)) return;
+  const now = Date.now();
+  if ((lastExternal.get(url) || 0) > now - 3000) return;
+  lastExternal.set(url, now);
+  if (lastExternal.size > 100) for (const [k, t] of lastExternal) if (t < now - 10000) lastExternal.delete(k);
+  shell.openExternal(url).catch((e) => {
+    console.error('[Kortex] NÃ£o foi possÃ­vel abrir ' + scheme + '://', e.message || e);
+    toast('Nenhuma aplicaÃ§Ã£o para abrir ' + scheme + '://');
+  });
+}
+
+function attachNavigationGuards(wc) {
+  const guard = (event, url) => {
+    try {
+      if (url === 'kortex://google-apps') {
+        event.preventDefault();
+        try { if (/(^|\.)google\.com$/i.test(new URL(wc.getURL()).hostname)) googleApps.openPopup(); } catch (e) {}
+        return;
+      }
+      if (url && url.startsWith('kortex://google-accounts')) {
+        event.preventDefault();
+        try { if (/(^|\.)google\.com$/i.test(new URL(wc.getURL()).hostname)) googleAccounts.openPopup(); } catch (e) {}
+        return;
+      }
+      if (!url || isInternalUrl(url)) return;
+      event.preventDefault();
+      openExternalUrl(url);
+    } catch (e) {}
+  };
+  wc.on('will-frame-navigate', (event, url, isMainFrame) => guard(event, url));
+  wc.on('will-redirect', guard);
+  wc.on('will-navigate', guard);
+}
+
+const isGoogleHost = (u) => {
+  try {
+    const h = new URL(u).hostname;
+    return /(^|\.)google\.com$/i.test(h) || /(^|\.)youtube\.com$/i.test(h);
+  } catch (e) { return false; }
+};
+
+function watchAuthPopup(wc) {
+  wc.on('did-navigate', (_e, url) => {
+    if (isGoogleHost(url)) return;
+    wc.once('did-finish-load', () => {
+      setTimeout(() => {
+        try {
+          if (!wc.isDestroyed() && !isGoogleHost(wc.getURL())) {
+            const win = BrowserWindow.fromWebContents(wc);
+            if (win && !win.isDestroyed()) win.close();
+          }
+        } catch (e) {}
+      }, 400);
+    });
+  });
+}
+
+app.on('web-contents-created', (event, contents) => {
+  attachNavigationGuards(contents);
+
+  contents.setWindowOpenHandler(({ url: target }) => {
+    const gp = googleCompat.popupOptions(target);
+    if (gp) return gp;
+
+    if (/^https?:/i.test(target)) {
+      createNewTab(target);
+      return { action: 'deny' };
+    }
+
+    if (!isInternalUrl(target)) {
+      openExternalUrl(target);
+      return { action: 'deny' };
+    }
+
+    return { action: 'allow' };
+  });
+
+  contents.on('did-create-window', (win, details) => {
+    try { if (googleCompat.isGoogleAuthUrl(details.url)) watchAuthPopup(win.webContents); } catch (e) {}
+  });
+});
+
+app.whenReady().then(async () => {
+  if (!gotTheLock) return;
+
+  nativeTheme.themeSource = 'system';
+  googleCompat.install(session.defaultSession, features.applyPrivacyHeaders);
+  try { session.defaultSession.setWebAuthnHandler((details, callback) => { callback({ action: 'cancel' }); }); } catch (e) {}
+
+  settings.init();
+  migrateAutofill();
+
+  const googleResetFlag = path.join(app.getPath('userData'), 'google-session-reset-done.json');
+  if (!fs.existsSync(googleResetFlag)) {
+    await require('./google-session-reset').resetGoogleSession(session.defaultSession);
+    try { fs.writeFileSync(googleResetFlag, '1'); } catch (e) {}
+  }
+  ipcMain.handle('security:resetGoogleSession', async () => {
+    await require('./google-session-reset').resetGoogleSession(session.defaultSession);
+    return true;
+  });
+
+  widevine.init();
+
+  protocol.handle('kortex', handleKortexRequest);
+
+  const adDomains = ['*://*.doubleclick.net/*', '*://*.google-analytics.com/*', '*://*.googlesyndication.com/*', '*://*.adservice.google.com/*', '*://*.facebook.com/tr*', '*://*.scorecardresearch.com/*', '*://*.adnxs.com/*', '*://*.quantserve.com/*', '*://*.outbrain.com/*', '*://*.taboola.com/*', '*://*.criteo.com/*', '*://*.criteo.net/*', '*://*.adroll.com/*', '*://*.amazon-adsystem.com/*', '*://*.pubmatic.com/*', '*://*.rubiconproject.com/*', '*://*.openx.net/*', '*://*.adsrvr.org/*'];
+  session.defaultSession.webRequest.onBeforeRequest({ urls: adDomains }, (details, callback) => {
+    callback({ cancel: settings.get('privacy.blockAds') !== false });
+  });
+
+  ext = new ElectronChromeExtensions({ session: session.defaultSession });
+  if (!app.isPackaged) logExtensionWorkers(session.defaultSession);
+  for (const extPath of savedExtensions) {
+    if (!disabledExtensions.some((p) => normalizePath(p) === normalizePath(extPath))) {
+      try { await session.defaultSession.extensions.loadExtension(extPath); console.log(`[Kortex] ExtensÃ£o carregada: ${extPath}`); }
+      catch (e) { console.error(`[Kortex] Erro ao carregar ${extPath}:`, e.message); }
+    }
+  }
+
+  features.init({ getViews: () => pageViews });
+  webstore.init({ registerExtension: (dir) => { if (!savedExtensions.includes(dir)) { savedExtensions.push(dir); try { fs.writeFileSync(extensionsJsonPath, JSON.stringify(savedExtensions)); } catch (e) {} } } });
+  pro.init({
+    settings,
+    getMainWindow: () => mainWindow, getChromeView: () => chromeView,
+    getViews: () => pageViews, getActiveId: () => activeTabId,
+    createNewTab: (u, p) => createNewTab(u, p), closeTab: (id) => closeTab(id), switchTab: (id) => switchTab(id),
+    sendTabsToUI: () => sendTabsToUI(), historyPath
+  });
+  ai.init({
+    settings,
+    getActiveView: () => pageViews[activeTabId],
+    getAllViews: () => pageViews,
+    getSkillsPrompt: () => aplicarSkills(null, null, activeTabId, pageViews)
+  });
+
+  createWindow();
+  startTabSuspension();
+
+  updater.init({
+    getWindow: () => mainWindow,
+    onBeforeInstall: () => { try { features.saveSessionTabs(() => pageViews); } catch (e) {} }
+  });
+
+  defaultBrowser.init({
+    openUrl: (u) => { if (uiReady) openFromOS(u); else pendingUrl = u; },
+    getWindow: () => mainWindow,
+    canPrompt: () => !updater.isBlocking() && fs.existsSync(configPath),
+    handleSecondInstance: false,
+    handleColdStart: false
+  });
+
+  googleApps.init({ getMainWindow: () => mainWindow, createNewTab: (u) => createNewTab(u) });
+  googleAccounts.init({
+    getMainWindow: () => mainWindow,
+    createNewTab: (u) => createNewTab(u),
+    getActiveUrl: () => (pageViews[activeTabId] ? pageViews[activeTabId].webContents.getURL() : ''),
+    getActiveEmail: () => getActiveGoogleEmail(pageViews[activeTabId]?.webContents)
+  });
+});
+
+app.on('kortex:open-internal', (url) => { if (/^kortex:\/\//i.test(url)) pro.openInternal(url); });
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
+function logExtensionWorkers(ses) {
+  try {
+    ses.serviceWorkers.on('console-message', (_e, d) => console.log('[Kortex][SW]', d.message, d.sourceUrl ? `(${d.sourceUrl}:${d.lineNumber})` : ''));
+    ses.serviceWorkers.on('registration-completed', (_e, d) => console.log('[Kortex][SW] registado:', d.scope));
+  } catch (e) {}
+}
+
+ipcMain.handle('app:isDefaultBrowser', () => defaultBrowser.isDefault());
+ipcMain.handle('app:setDefaultBrowser', async () => {
+  await defaultBrowser.makeDefault();
+  return defaultBrowser.isDefault();
+});
+
+ipcMain.handle('settings:get', (e, key) => settings.get(key));
+ipcMain.handle('settings:getAll', () => settings.getAll());
+ipcMain.handle('settings:set', async (e, key, val) => { try { return await settings.set(key, val); } catch (err) { return { success: false, error: err.message }; } });
+ipcMain.handle('settings:reset', async (e, prefix) => { try { return await settings.reset(typeof prefix === 'string' ? prefix : ''); } catch (err) { return { success: false, error: err.message }; } });
+ipcMain.handle('plugins:get', () => settings.get('plugins') || {});
+ipcMain.handle('plugins:toggle', (e, id, val) => { const p = settings.get('plugins') || {}; p[id] = !!val; return settings.set('plugins', p); });
+
+ipcMain.handle('get-config', () => {
+  if (fs.existsSync(configPath)) { try { return JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) { return { name: 'Utilizador' }; } }
+  return { name: 'Utilizador' };
+});
+ipcMain.handle('profile:update', (e, data) => {
+  let c = {};
+  if (fs.existsSync(configPath)) c = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  c.name = data.name; c.username = data.username; c.avatar = data.avatar;
+  fs.writeFileSync(configPath, JSON.stringify(c));
+  chromeView.webContents.send('profile-updated', c);
+  return { success: true };
+});
+ipcMain.handle('setup:save', (e, data) => {
+  fs.writeFileSync(configPath, JSON.stringify(data));
+  chromeView.webContents.loadFile(path.join(RENDERER_DIR, 'index.html'));
+  return true;
+});
+
+function sendTabsToUI() {
+  const list = Object.keys(pageViews).concat(Object.keys(suspended)).map((id) => {
+    if (!pageViews[id]) {
+      const s = suspended[id];
+      return pro.tabInfo(id, { id, title: s.title, url: s.url, isPrivate: s.isPrivate, suspended: true });
+    }
+    const view = pageViews[id];
+    const url = view.webContents.getURL();
+    let title = (view.webContents.getTitle() || '').trim();
+    if (url.startsWith('kortex://')) {
+      title = internalTitle(url);
+    } else if (url === 'about:blank' || url === '') {
+      title = view.isPrivate ? 'NavegaÃ§Ã£o Privada' : 'Novo separador';
+    } else if (!title || title === 'K' || title === 'Kortex') {
+      try { title = new URL(url).hostname.replace('www.', ''); } catch (e) { title = 'A carregar...'; }
+    }
+    return pro.tabInfo(id, { id, title, url, isPrivate: view.isPrivate || false });
+  });
+  list.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('tabs:updated-list', { tabs: list, activeId: activeTabId });
+}
+
+function updateTabVisibility() {
+  const view = pageViews[activeTabId];
+  if (!view) return;
+  const url = view.webContents.getURL();
+  const isHome = url === 'about:blank' || url === '';
+  view.setVisible(!isHome);
+  chromeView.webContents.send('show-home', isHome);
+}
+
+function applyBounds(view) {
+  if (view && pageBounds) view.setBounds(pageBounds);
+}
+
+function markActive(id) { lastActiveAt[id] = Date.now(); }
+
+function suspendTab(id) {
+  const view = pageViews[id];
+  if (!view || view.webContents.isDestroyed()) return;
+  if (id === activeTabId) return;
+  if (view.webContents.isCurrentlyAudible()) return;
+  if (view.webContents.isLoading()) return;
+  const url = view.webContents.getURL();
+  if (!url || url === 'about:blank' || url.startsWith('kortex://')) return;
+
+  const info = { url, title: view.webContents.getTitle(), isPrivate: !!view.isPrivate };
+  try { if (ext && !info.isPrivate) ext.removeTab(view.webContents); } catch (e) {}
+  try { mainWindow.contentView.removeChildView(view); } catch (e) {}
+  try { view.webContents.close(); } catch (e) {}
+
+  suspended[id] = info;
+  delete pageViews[id];
+  delete lastActiveAt[id];
+  sendTabsToUI();
+}
+
+function sweepSuspendableTabs() {
+  const now = Date.now();
+  Object.keys(pageViews).forEach((id) => {
+    if (id === activeTabId) return;
+    if (now - (lastActiveAt[id] || now) >= TAB_SUSPEND_MS) suspendTab(id);
+  });
+}
+
+function startTabSuspension() {
+  if (suspendTimer) return;
+  suspendTimer = setInterval(sweepSuspendableTabs, 60 * 1000);
+}
+
+function reviveSuspendedTab(id) {
+  const info = suspended[id];
+  if (!info) return;
+  delete suspended[id];
+
+  let tabSession = session.defaultSession;
+  if (info.isPrivate) {
+    tabSession = session.fromPartition('private-' + Date.now(), { cache: false });
+    googleCompat.applySession(tabSession, true);
+    tabSession.protocol.handle('kortex', handleKortexRequest);
+    pro.setupSession(tabSession);
+  }
+
+  const view = new WebContentsView({ webPreferences: { session: tabSession, preload: WEBVIEW_PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false, plugins: true } });
+  mainWindow.contentView.addChildView(view);
+  raiseOverlays();
+
+  pageViews[id] = view;
+  view.isPrivate = info.isPrivate;
+  view.setBackgroundColor('#00000000');
+  applyBounds(view);
+  view.webContents.loadURL(info.url).catch(() => {});
+
+  pro.attachView(id, view);
+  webstore.attachView(view);
+  view.webContents.on('dom-ready', () => { features.applyZoom(view.webContents); });
+  view.webContents.on('did-finish-load', () => { view.webContents.invalidate(); });
+
+  if (ext && !info.isPrivate) ext.addTab(view.webContents, mainWindow);
+}
+
+function createNewTab(url = 'about:blank', isPrivate = false) {
+  tabCounter++;
+  const id = 'tab-' + tabCounter;
+  let tabSession = session.defaultSession;
+  if (isPrivate) {
+    tabSession = session.fromPartition('private-' + Date.now(), { cache: false });
+    googleCompat.applySession(tabSession, true);
+    tabSession.protocol.handle('kortex', handleKortexRequest);
+    pro.setupSession(tabSession);
+  }
+
+  const view = new WebContentsView({ webPreferences: { session: tabSession, preload: WEBVIEW_PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false, plugins: true } });
+  mainWindow.contentView.addChildView(view);
+  raiseOverlays();
+
+  pageViews[id] = view;
+  view.isPrivate = isPrivate;
+  view.setBackgroundColor('#00000000');
+  applyBounds(view);
+  view.webContents.loadURL(url).catch(() => {});
+
+  pro.attachView(id, view);
+  webstore.attachView(view);
+  view.webContents.on('dom-ready', () => {
+    features.applyZoom(view.webContents);
+    
+    if (view.webContents.getURL().includes('mail.google.com')) {
+      // 1. CSS
+      view.webContents.insertCSS(`
+        #kortex-account-btn {
+          position: fixed !important; top: 12px !important; right: 170px !important;
+          z-index: 99999 !important; display: flex !important; align-items: center !important;
+          gap: 8px !important; background: #ff5722 !important; color: #fff !important;
+          font: bold 14px "Segoe UI", system-ui, sans-serif !important;
+          padding: 8px 16px !important; border-radius: 24px !important; cursor: pointer !important;
+          box-shadow: 0 4px 15px rgba(255,87,34,0.5) !important; border: 2px solid #fff !important;
+          user-select: none !important; transition: transform 0.2s !important;
+        }
+        #kortex-account-btn:hover { transform: scale(1.08) !important; }
+
+        #kortex-search-container {
+          position: fixed !important; top: 8px !important; left: 260px !important;
+          width: 50% !important; max-width: 650px !important; z-index: 99998 !important;
+          display: flex !important; align-items: center !important;
+        }
+        #kortex-search-input {
+          width: 100% !important; height: 46px !important;
+          background: #f1f3f4 !important; border: 1px solid transparent !important;
+          border-radius: 8px !important; padding: 0 16px 0 48px !important;
+          font-family: "Google Sans", Roboto, sans-serif !important;
+          font-size: 16px !important; color: #202124 !important;
+          outline: none !important;
+        }
+        #kortex-search-icon {
+          position: absolute !important; left: 16px !important;
+          top: 50% !important; transform: translateY(-50%) !important;
+          color: #5f6368 !important; font-size: 20px !important; pointer-events: none !important;
+        }
+      `).catch(() => {});
+
+      // 2. JavaScript (FunÃ§Ã£o Auto-Contida)
+      const jsInjection = `
+        (function() {
+          function addBtn() {
+            if (document.getElementById('kortex-account-btn')) return;
+            if (!document.body) return;
+            var btn = document.createElement('div');
+            btn.id = 'kortex-account-btn';
+            var spanK = document.createElement('span'); spanK.style.fontSize = '16px'; spanK.textContent = 'K';
+            var textNode = document.createTextNode(' Contas');
+            btn.appendChild(spanK); btn.appendChild(textNode);
+            btn.onclick = function() { window.location.href = 'kortex://google-accounts'; };
+            document.body.appendChild(btn);
+          }
+
+          function addSearchBar() {
+            if (document.getElementById('kortex-search-container')) return;
+            if (!document.body) return;
+            var container = document.createElement('div');
+            container.id = 'kortex-search-container';
+            var icon = document.createElement('span'); icon.id = 'kortex-search-icon'; icon.textContent = 'ðŸ”';
+            var input = document.createElement('input'); input.id = 'kortex-search-input'; input.type = 'text'; input.placeholder = 'Pesquisar no e-mail';
+            input.addEventListener('keydown', function(e) {
+              if (e.key === 'Enter') {
+                var q = encodeURIComponent(input.value.trim());
+                if (q) window.location.href = 'https://mail.google.com/mail/u/0/#search/' + q;
+              }
+            });
+            container.appendChild(icon); container.appendChild(input);
+            document.body.appendChild(container);
+          }
+
+          function injectAll() { addBtn(); addSearchBar(); }
+          injectAll();
+          
+          try {
+            new MutationObserver(injectAll).observe(document.documentElement, { childList: true, subtree: true });
+          } catch(e) {}
+        })();
+      `;
+
+      view.webContents.executeJavaScript(jsInjection).catch(() => {});
+    }
+  });      // 2. Injetar os elementos
+      view.webContents.executeJavaScript(`
+        (function() {
+          function addBtn() {
+            if (document.getElementById('kortex-account-btn')) return;
+            if (!document.body) return;
+            var btn = document.createElement('div');
+            btn.id = 'kortex-account-btn';
+            var spanK = document.createElement('span'); spanK.style.fontSize = '16px'; spanK.textContent = 'K';
+            var textNode = document.createTextNode(' Contas');
+            btn.appendChild(spanK); btn.appendChild(textNode);
+            btn.onclick = function() { window.location.href = 'kortex://google-accounts'; };
+            document.body.appendChild(btn);
+          }
+
+          function addWaffleBtn() {
+            if (document.getElementById('kortex-waffle-btn')) return;
+            if (!document.body) return;
+            var btn = document.createElement('div');
+            btn.id = 'kortex-waffle-btn';
+            // Ãcone SVG do Waffle (9 pontinhos)
+            btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 12c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6-12c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 12c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>';
+            btn.onclick = function() { window.location.href = 'kortex://google-apps'; };
+            document.body.appendChild(btn);
+          }
+
+          function addSearchBar() {
+            if (document.getElementById('kortex-search-container')) return;
+            if (!document.body) return;
+            var container = document.createElement('div');
+            container.id = 'kortex-search-container';
+            var icon = document.createElement('span'); icon.id = 'kortex-search-icon'; icon.textContent = 'ðŸ”';
+            var input = document.createElement('input'); input.id = 'kortex-search-input'; input.type = 'text'; input.placeholder = 'Pesquisar no e-mail';
+            input.addEventListener('keydown', function(e) {
+              if (e.key === 'Enter') {
+                var q = encodeURIComponent(input.value.trim());
+                if (q) window.location.href = 'https://mail.google.com/mail/u/0/#search/' + q;
+              }
+            });
+            container.appendChild(icon); container.appendChild(input);
+            document.body.appendChild(container);
+          }
+
+          function injectAll() { addBtn(); addWaffleBtn(); addSearchBar(); }
+          
+          injectAll();
+          new MutationObserver(injectAll).observe(document.documentElement, { childList: true, subtree: true });
+        })();
+      `).catch(() => {});
+    }
+  });

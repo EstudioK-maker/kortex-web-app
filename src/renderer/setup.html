@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    body { display: flex; align-items: center; justify-content: center; height: 100vh; background: #0f1011; color: #fff; margin: 0; font-family: "Segoe UI", sans-serif; }
+    .setup-box { background: #1a1b1d; padding: 40px; border-radius: 16px; border: 1px solid #2c2d31; width: 450px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    h1 { margin-bottom: 10px; font-weight: 500; }
+    p { color: #888; margin-bottom: 30px; font-size: 14px; }
+    input[type="text"] { width: 100%; padding: 14px; background: #0f1011; border: 1px solid #38393d; color: #fff; border-radius: 8px; margin-bottom: 20px; outline: none; font-size: 15px; box-sizing: border-box; transition: 0.2s; }
+    input[type="text"]:focus { border-color: #ff5722; box-shadow: 0 0 0 3px rgba(255,87,34,0.14); }
+    .color-picker { display: flex; justify-content: center; gap: 15px; margin-bottom: 30px; }
+    .color-swatch { width: 40px; height: 40px; border-radius: 50%; cursor: pointer; border: 3px solid transparent; transition: 0.2s; }
+    .color-swatch:hover { transform: scale(1.1); }
+    .color-swatch.active { border-color: #fff; box-shadow: 0 0 10px rgba(255,255,255,0.3); }
+    .btn-continue { width: 100%; padding: 14px; background: #ff5722; color: #fff; border: none; border-radius: 8px; font-weight: 600; font-size: 15px; cursor: pointer; transition: 0.2s; }
+    .btn-continue:hover { background: #ff6d40; }
+  </style>
+</head>
+<body>
+  <div class="setup-box">
+    <h1>Bem-vindo ao Kortex</h1>
+    <p>Vamos preparar o teu navegador.</p>
+    
+    <input type="text" id="input-name" placeholder="Como queres ser chamado?" maxlength="20" autofocus>
+    
+    <p style="margin-bottom: 10px; font-size: 13px;">Escolhe a cor do teu tema:</p>
+    <div class="color-picker">
+      <div class="color-swatch active" style="background: #ff5722;" data-color="#ff5722"></div>
+      <div class="color-swatch" style="background: #3b82f6;" data-color="#3b82f6"></div>
+      <div class="color-swatch" style="background: #10b981;" data-color="#10b981"></div>
+      <div class="color-swatch" style="background: #8b5cf6;" data-color="#8b5cf6"></div>
+    </div>
+
+    <button class="btn-continue" id="btn-continue">Começar a usar o Kortex</button>
+  </div>
+
+  <script>
+    let selectedColor = '#ff5722';
+    document.querySelectorAll('.color-swatch').forEach(swatch => {
+      swatch.addEventListener('click', () => {
+        document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
+        swatch.classList.add('active');
+        selectedColor = swatch.getAttribute('data-color');
+      });
+    });
+    document.getElementById('btn-continue').addEventListener('click', () => {
+      const name = document.getElementById('input-name').value.trim();
+      if (!name) return alert('Por favor, escreve o teu nome.');
+      window.kortex.setupSave({ name: name, color: selectedColor });
+    });
+    document.getElementById('input-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') document.getElementById('btn-continue').click();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+﻿<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <title>Kortex - Em breve</title>
+  <link rel="stylesheet" href="settings.css">
+  <style>
+    body { display: grid; place-items: center; height: 100vh; text-align: center; background: var(--bg-color); color: var(--text-color); }
+    h1 { font-size: 32px; margin-bottom: 12px; color: #fff; }
+    p { color: var(--text-muted); font-size: 15px; }
+    .icon { width: 64px; height: 64px; color: var(--accent-color); margin-bottom: 24px; }
+  </style>
+</head>
+<body>
+  <div>
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+    <h1 id="page-title">Página em construção</h1>
+    <p>Esta funcionalidade será implementada nas próximas fases do guião.</p>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const title = params.get('title');
+    if (title) {
+      document.getElementById('page-title').innerText = title;
+      document.title = title + ' - Kortex';
+    }
+  </script>
+</body>
+</html>

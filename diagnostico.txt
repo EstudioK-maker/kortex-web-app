@@ -1,0 +1,187 @@
+﻿=== 1. MOJIBAKE (contagem por arquivo) ===
+68  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141029\main.js
+68  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141028\main.js
+68  C:\Users\Admin\Desktop\EstudioK-Browser\src\main\main.js
+25  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141028\browser-features.js
+25  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141029\browser-features.js
+24  C:\Users\Admin\Desktop\EstudioK-Browser\src\renderer\js\app.js
+14  C:\Users\Admin\Desktop\EstudioK-Browser\src\main\ai.js
+11  C:\Users\Admin\Desktop\EstudioK-Browser\site\index.html
+5  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141028\webview-preload.js
+5  C:\Users\Admin\Desktop\EstudioK-Browser\backups\pre-repair-20261119-141029\webview-preload.js
+1  C:\Users\Admin\Desktop\EstudioK-Browser\dist\win-unpacked\LICENSES.chromium.html
+
+=== 2. MOJIBAKE (primeiras 25 linhas) ===
+browser-features.js:1: // src/main/browser-features.js â€” funcionalidades de navegador "a sÃ©rio" para o Kortex
+browser-features.js:22: // ... (Marcadores, HistÃ³rico, Downloads, PermissÃµes, etc. mantidos resumidos para o script caber) ...
+browser-features.js:84: /* ---------------- HistÃ³rico ---------------- */
+browser-features.js:91: /* ---------------- TransferÃªncias ---------------- */
+browser-features.js:109: item.once('done', (_e, state) => { d.state = state; d.received = item.getReceivedBytes(); d.path = item.getSavePath() || d.path; dlItems.delete(d.id); writeJson('downloads.json', downloads.slice(0, 200)); push(); if (state === 'completed') note('Download concluÃ­do: ' + d.name); });
+browser-features.js:120: /* ---------------- PermissÃµes ---------------- */
+browser-features.js:126: case 'media': { const t = (details && details.mediaTypes) || []; return t.includes('video') && t.includes('audio') ? 'usar a cÃ¢mara e o microfone' : t.includes('video') ? 'usar a cÃ¢mara' : 'usar o microfone'; }
+browser-features.js:127: case 'geolocation': return 'saber a tua localizaÃ§Ã£o'; case 'notifications': return 'enviar-te notificaÃ§Ãµes'; case 'display-capture': return 'partilhar o teu ecrÃ£'; case 'clipboard-read': return 'ler a Ã¡rea de transferÃªncia'; default: return 'usar a permissÃ£o "' + permission + '"';
+browser-features.js:132: const r = await dialog.showMessageBox({ type: 'question', buttons: ['Permitir', 'Bloquear'], defaultId: 1, cancelId: 1, title: 'Pedido de permissÃ£o', message: `${host} quer ${describePermission(permission, details)}`, checkboxLabel: persist ? 'Lembrar a minha escolha para este site' : 'Lembrar nesta sessÃ£o privada', checkboxChecked: persist });
+browser-features.js:150: ipcMain.handle('permissions:list', () => Object.keys(perms).map((k) => { const i = k.lastIndexOf('|'); const permission = k.slice(i + 1); const label = permission === 'media' ? 'usar a cÃ¢mara ou o microfone' : describePermission(permission, {}); return { key: k, origin: k.slice(0, i), permission, label, allowed: perms[k] === true }; }));
+browser-features.js:155: /* ---------------- Partilha de ecrÃ£ ---------------- */
+browser-features.js:159: const cards = items.map((it) => `<div class="card" data-i="${it.i}" tabindex="0" role="button" aria-label="${esc(it.name)}">` + (it.thumb ? `<img class="pic" src="${it.thumb}" alt="">` : `<div class="ph">PrÃ©-visualizaÃ§Ã£o indisponÃ­vel</div>`) + `<div class="meta">${it.icon ? `<img class="icon" src="${it.icon}" alt="">` : ''}<span>${esc(it.name)}</span></div><div class="kind">${it.kind === 'screen' ? 'EcrÃ£ inteiro' : 'Janela'}</div></div>`).join('');
+browser-features.js:160: return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Partilhar o ecrÃ£</title><style>body{margin:0;background:#141517;color:#ececee;font-family:"Segoe UI",system-ui,sans-serif;user-select:none}header{padding:18px 22px 6px}h1{font-size:17px;font-weight:600;margin:0 0 4px}header p{margin:0;font-size:12px;color:#9a9aa2}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:14px 22px 6px}.card{background:#1f2023;border:1px solid #2c2d31;border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s}.card:hover,.card:focus{border-color:#ff5722;outline:none}.card .pic{display:block;width:100%;height:168px;object-fit:cover;background:#0c0d0e}.ph{height:168px;background:#0c0d0e;display:grid;place-items:center;color:#55565b;font-size:12px}.meta{display:flex;align-items:center;gap:8px;padding:8px 12px 0}.meta .icon{width:16px;height:16px;border-radius:3px;flex:none}.meta span{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kind{font-size:11px;color:#8a8b90;padding:2px 12px 10px}footer{display:flex;justify-content:flex-end;padding:10px 22px 18px}button{background:#2c2d31;color:#ececee;border:0;border-radius:8px;padding:9px 18px;font-size:13px;cursor:pointer}button:hover{background:#38393d}</style></head><body><header><h1>Escolher o que partilhar</h1><p>Seleciona um ecrÃ£ inteiro ou uma janela â€” a partilha comeÃ§a de imediato.</p></header><div id="grid">${cards}</div><footer><button id="cancel">Cancelar</button></footer><script>var done=false,resolver=null;window.__pickPromise=new Promise(function(r){resolver=r;});function finish(v){if(done)return;done=true;resolver(v);}document.querySelectorAll('.card').forEach(function(c){c.addEventListener('click',function(){finish(parseInt(c.dataset.i,10));});c.addEventListener('keydown',function(e){if(e.key==='Enter')finish(parseInt(c.dataset.i,10));});});document.getElementById('cancel').addEventListener('click',function(){finish(null);});document.addEventListener('keydown',function(e){if(e.key==='Escape')finish(null);});setTimeout(function(){finish(null);},120000);</script></body></html>`;
+browser-features.js:164: const items = sources.map((s, i) => ({ i, name: s.name || (String(s.id).startsWith('screen:') ? 'EcrÃ£ ' + (i + 1) : 'Janela'), kind: String(s.id).startsWith('screen:') ? 'screen' : 'window', thumb: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : '', icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : '' }));
+browser-features.js:166: const win = new BrowserWindow({ width: 760, height: 540, ...(mw && !mw.isDestroyed() ? { parent: mw, modal: true } : {}), frame: false, resizable: false, minimizable: false, maximizable: false, fullscreenable: false, alwaysOnTop: true, show: false, backgroundColor: '#141517', title: 'Partilhar o ecrÃ£', autoHideMenuBar: true, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false } });
+browser-features.js:233: if (key === 'd') return run(() => { if (!awc) return; const r = toggleBookmark(awc.getURL(), awc.getTitle()); note(r.ok ? (r.bookmarked ? 'Marcador adicionado' : 'Marcador removido') : 'Esta pÃ¡gina nÃ£o pode ser guardada'); });
+browser-features.js:260: { label: 'Fechar Ã  direita', click: () => { const ids = Object.keys(views()); ids.slice(ids.indexOf(id) + 1).filter((x) => !views()[x].pinned).forEach((x) => ctx.closeTab(x)); } }
+browser-features.js:266: /* ---------------- PÃ¡gina de erro ---------------- */
+browser-features.js:270: return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>NÃ£o foi possÃ­vel aceder ao site</title><style>body{margin:0;height:100vh;display:grid;place-items:center;background:#1a1b1d;color:#ececee;font-family:"Segoe UI",system-ui,sans-serif}.b{max-width:480px;padding:24px}h1{font-size:22px;font-weight:600;margin-bottom:10px}p{color:#9a9aa2;line-height:1.5;margin-bottom:6px}code{color:#ff5722}button{margin-top:18px;padding:10px 22px;border:0;border-radius:8px;background:#ff5722;color:#fff;font-size:14px;font-weight:600;cursor:pointer}</style></head><body><div class="b"><h1>NÃ£o foi possÃ­vel aceder ao site</h1><p><code>${esc(url)}</code></p><p>${esc(desc)}</p><p>Verifica a ligaÃ§Ã£o Ã  internet e o endereÃ§o.</p><button onclick="location.href=${js}">Tentar de novo</button></div></body></html>`;
+browser-features.js:283: if (sel && !p.isEditable) { const short = sel.length > 28 ? sel.slice(0, 28) + 'â€¦' : sel; t.push({ label: 'Copiar', click: () => wc.copy() }); t.push({ label: `Pesquisar Â«${short}Â»`, click: () => ctx.createNewTab(ctx.settings.searchUrl(sel)) }); }
+browser-features.js:285: if (p.linkURL) { sep(); t.push({ label: 'Abrir ligaÃ§Ã£o num novo separador', click: () => ctx.createNewTab(p.linkURL) }, { label: 'Copiar endereÃ§o da ligaÃ§Ã£o', click: () => clipboard.writeText(p.linkURL) }); }
+browser-features.js:286: if (p.mediaType === 'image' && p.srcURL) { sep(); t.push({ label: 'Abrir imagem num novo separador', click: () => ctx.createNewTab(p.srcURL) }, { label: 'Guardar imagem comoâ€¦', click: () => wc.downloadURL(p.srcURL) }, { label: 'Copiar imagem', click: () => wc.copyImageAt(p.x, p.y) }, { label: 'Copiar endereÃ§o da imagem', click: () => clipboard.writeText(p.srcURL) }); }
+browser-features.js:287: if (!p.isEditable && !sel && !p.linkURL && p.mediaType !== 'image') { t.push({ label: 'Recuar', enabled: nav.canGoBack(), click: () => nav.goBack() }, { label: 'AvanÃ§ar', enabled: nav.canGoForward(), click: () => nav.goForward() }, { label: 'Recarregar', click: () => wc.reload() }, { type: 'separator' }, { label: 'Resumir esta pÃ¡gina', click: () => askAI('Resume esta pÃ¡gina em pontos principais.') }, { label: 'Perguntar ao Kortex sobre esta pÃ¡gina', click: () => askAI('') }, { type: 'separator' }, { label: 'Guardar pÃ¡gina comoâ€¦', click: () => wc.downloadURL(wc.getURL()) }, { label: 'Imprimirâ€¦', click: () => wc.print() }, { label: 'Traduzir esta pÃ¡gina', click: () => ctx.createNewTab('https://translate.google.com/translate?sl=auto&tl=pt&u=' + encodeURIComponent(wc.getURL())) }, { label: 'Ver cÃ³digo-fonte', click: () => ctx.createNewTab('view-source:' + wc.getURL()) }); }
+browser-features.js:293: /* ---------------- LigaÃ§Ãµes por separador ---------------- */
+browser-features.js:303: // AQUI ESTÃ A INJEÃ‡ÃƒO DO CLAUDE
+
+=== 3. ORIGEM DO 'HistÃ³rico' ===
+browser-features.js:22: // ... (Marcadores, HistÃ³rico, Downloads, PermissÃµes, etc. mantidos resumidos para o script caber) ...
+browser-features.js:84: /* ---------------- HistÃ³rico ---------------- */
+main.js:82: history: 'HistÃ³rico', bookmarks: 'Marcadores', downloads: 'TransferÃªncias',
+main.js:652: /* ---------------- HistÃ³rico ---------------- */
+browser-features.js:22: // ... (Marcadores, HistÃ³rico, Downloads, PermissÃµes, etc. mantidos resumidos para o script caber) ...
+browser-features.js:84: /* ---------------- HistÃ³rico ---------------- */
+main.js:82: history: 'HistÃ³rico', bookmarks: 'Marcadores', downloads: 'TransferÃªncias',
+main.js:652: /* ---------------- HistÃ³rico ---------------- */
+main.js:92: history: 'HistÃ³rico', bookmarks: 'Marcadores', downloads: 'TransferÃªncias',
+main.js:663: /* ---------------- HistÃ³rico ---------------- */
+
+=== 4. onShowHome (com contexto) ===
+
+  src\renderer\js\answer.js:257:  document.addEventListener('DOMContentLoaded', () => {
+  src\renderer\js\answer.js:258:    K.tabs.onListUpdated(({ activeId: id }) => { activeId = id; });
+  src\renderer\js\answer.js:259:    // O processo principal avisa antes de atualizar a lista de separadores, por isso 
+decidimos com um pequeno atraso.
+> src\renderer\js\answer.js:260:    K.tabs.onShowHome((show) => {
+  src\renderer\js\answer.js:261:      setTimeout(() => {
+  src\renderer\js\answer.js:262:        if (!view) return;
+  src\renderer\js\answer.js:263:        const mine = show && state.open && activeId === state.tabId;
+  src\renderer\js\answer.js:264:        view.hidden = !mine;
+  src\renderer\js\answer.js:265:        const hv = $('#home-view');
+  src\renderer\js\answer.js:266:        if (hv && show) hv.hidden = mine;
+  src\renderer\js\answer.js:267:      }, 60);
+  src\renderer\js\answer.js:268:    });
+  src\renderer\js\answer.js:269:    const nc = $('#nav-new-chat');
+  src\renderer\js\answer.js:270:    if (nc) nc.addEventListener('click', reset);
+  src\renderer\js\answer.js:271:  });
+  src\renderer\js\answer.js:272:})();
+  src\renderer\js\app.js:235:    });
+  src\renderer\js\app.js:236:  }
+  src\renderer\js\app.js:237:
+> src\renderer\js\app.js:238:  K.tabs.onShowHome((show) => {
+> src\renderer\js\app.js:239:    console.log("[KORTEX-DEBUG] onShowHome disparado, show=", show);
+  src\renderer\js\app.js:240:    const home = $('#home-view');
+  src\renderer\js\app.js:241:    const recents = $('#sidebar-recents');
+  src\renderer\js\app.js:242:    if (home) home.hidden = !show;
+  src\renderer\js\app.js:243:    
+  src\renderer\js\app.js:244:    if (show) renderRecents();
+  src\renderer\js\app.js:245:
+  src\renderer\js\app.js:246:    if (show) setTimeout(() => { const hcf = $('#home-chat-field'); if (hcf) hcf.focus(); 
+else urlInput.focus(); }, 0);
+  src\renderer\js\app.js:247:  });
+  src\renderer\js\app.js:248:  K.history.onUpdated?.(renderRecents);
+  src\renderer\js\app.js:249:  renderRecents();
+  src\renderer\js\app.js:250:
+  src\renderer\js\app.js:251:  /* ============================== Barra de endereÃ§o ============================== */
+
+
+
+=== 5. tabs.create / showHome / emit ===
+
+  src\renderer\js\answer.js:66:
+  src\renderer\js\answer.js:67:  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } 
+catch { return u; } };
+> src\renderer\js\answer.js:68:  const openUrl = (u) => K.tabs.create(u);
+  src\renderer\js\answer.js:69:  const scrollDown = (force) => {
+  src\renderer\js\answer.js:70:    const sc = $('#ans-scroll');
+  src\renderer\js\answer.js:71:    if (!sc) return;
+  src\renderer\js\answer.js:72:    if (force || sc.scrollHeight - sc.scrollTop - sc.clientHeight < 160) sc.scrollTop = 
+sc.scrollHeight;
+  src\renderer\js\answer.js:73:  };
+  src\renderer\js\answer.js:74:  const setBtn = (busy) => { sendBtn.innerHTML = busy ? ICON_STOP : ICON_SEND; 
+sendBtn.classList.toggle('is-stop', busy); };
+  src\renderer\js\answer.js:258:    K.tabs.onListUpdated(({ activeId: id }) => { activeId = id; });
+  src\renderer\js\answer.js:259:    // O processo principal avisa antes de atualizar a lista de separadores, por isso 
+decidimos com um pequeno atraso.
+> src\renderer\js\answer.js:260:    K.tabs.onShowHome((show) => {
+  src\renderer\js\answer.js:261:      setTimeout(() => {
+  src\renderer\js\answer.js:262:        if (!view) return;
+  src\renderer\js\answer.js:263:        const mine = show && state.open && activeId === state.tabId;
+  src\renderer\js\answer.js:264:        view.hidden = !mine;
+  src\renderer\js\answer.js:265:        const hv = $('#home-view');
+  src\renderer\js\answer.js:266:        if (hv && show) hv.hidden = mine;
+  src\renderer\js\app.js:183:    add.title = 'Novo separador (Ctrl+T)';
+  src\renderer\js\app.js:184:    add.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
+> src\renderer\js\app.js:185:    add.addEventListener('click', () => K.tabs.create());
+  src\renderer\js\app.js:186:    tabStrip.append(add);
+  src\renderer\js\app.js:187:
+  src\renderer\js\app.js:188:    if (activeId !== lastActiveId) { lastActiveId = activeId; hideSuggestions(); }
+  src\renderer\js\app.js:189:    const active = tabs.find((t) => t.id === activeId);
+  src\renderer\js\app.js:190:    updateSecurityBadge(active);
+  src\renderer\js\app.js:191:    if (urlInput) {
+  src\renderer\js\app.js:236:  }
+  src\renderer\js\app.js:237:
+> src\renderer\js\app.js:238:  K.tabs.onShowHome((show) => {
+> src\renderer\js\app.js:239:    console.log("[KORTEX-DEBUG] onShowHome disparado, show=", show);
+  src\renderer\js\app.js:240:    const home = $('#home-view');
+  src\renderer\js\app.js:241:    const recents = $('#sidebar-recents');
+  src\renderer\js\app.js:242:    if (home) home.hidden = !show;
+  src\renderer\js\app.js:243:    
+  src\renderer\js\app.js:244:    if (show) renderRecents();
+  src\renderer\js\app.js:245:
+  src\renderer\js\app.js:366:    K.extMenu.toggle({ x: r.x, y: r.y, width: r.width, height: r.height });
+  src\renderer\js\app.js:367:  });
+> src\renderer\js\app.js:368:  $('#btn-private')?.addEventListener('click', () => K.tabs.createPrivate());
+  src\renderer\js\app.js:369:  $('#btn-profile')?.addEventListener('click', (e) => {
+  src\renderer\js\app.js:370:    const rect = e.currentTarget.getBoundingClientRect();
+  src\renderer\js\app.js:371:    K.menu.open('main', rect.right - 10, rect.bottom + 4);
+  src\renderer\js\app.js:372:  });
+  src\renderer\js\app.js:373:  $('#btn-assistant')?.addEventListener('click', () => 
+$('#assistant-panel')?.classList.toggle('is-open'));
+  src\renderer\js\app.js:374:  $('#assistant-close')?.addEventListener('click', () => 
+$('#assistant-panel')?.classList.remove('is-open'));
+  src\renderer\js\chat.js:268:    if (!s.box) return;
+  src\renderer\js\chat.js:269:    s.box.classList.add('chat-log');
+> src\renderer\js\chat.js:270:    s.box.addEventListener('click', (e) => { const a = e.target.closest('a[data-href]'); 
+if (a) K.tabs.create(a.dataset.href); });
+  src\renderer\js\chat.js:271:
+  src\renderer\js\chat.js:272:    field.addEventListener('paste', (e) => {
+  src\renderer\js\chat.js:273:      const items = e.clipboardData && e.clipboardData.items;
+  src\renderer\js\chat.js:274:      if (!items) return;
+  src\renderer\js\chat.js:275:      for (let i = 0; i < items.length; i++) {
+  src\renderer\js\chat.js:276:        const item = items[i];
+  src\renderer\js\features-ui.js:50:        const btn = make('button', { class: 'bm-item', type: 'button', title: 
+b.url, text: (b.title || b.url).slice(0, 26) });
+  src\renderer\js\features-ui.js:51:        btn.addEventListener('click', () => K.tabs.navigate('current', b.url));
+> src\renderer\js\features-ui.js:52:        btn.addEventListener('auxclick', (e) => { if (e.button === 1) 
+K.tabs.create(b.url); });
+  src\renderer\js\features-ui.js:53:        btn.addEventListener('contextmenu', async (e) => {
+  src\renderer\js\features-ui.js:54:          e.preventDefault();
+  src\renderer\js\features-ui.js:55:          if (confirm('Remover "' + (b.title || b.url) + '" dos marcadores?')) 
+await K.bookmarks.remove(b.id);
+  src\renderer\js\features-ui.js:56:        });
+  src\renderer\js\features-ui.js:57:        bar.append(btn);
+  src\renderer\js\features-ui.js:58:      });
+
+
+
+=== 6. home-chat-field e botao + (HTML) ===
+
+  src\renderer\index.html:16:  <header class="titlebar">
+> src\renderer\index.html:17:    <div class="tab-strip" id="tab-strip"></div>
+  src\renderer\index.html:18:    <div class="window-controls">
+  src\renderer\index.html:19:      <button class="window-btn" id="win-minimize" title="Minimizar"><svg viewBox="0 0 12 
+12"><path d="M2 6h8"/></svg></button>
+  src\renderer\index.html:104:            <form class="chat-input" id="home-chat-input">
+> src\renderer\index.html:105:              <textarea class="chat-input__field" id="home-chat-field" rows="2" 
+placeholder="Escreve @ para conetores"></textarea>
+  src\renderer\index.html:106:              <div class="chat-input__bar">
+  src\renderer\index.html:107:                <div class="chat-input__tools">
+
+
+
+=== 7. console.log inserido ===

@@ -1,0 +1,3180 @@
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\main.js ---
+=============================================================
+// src/main/main.js — processo principal do Kortex.
+const { app, nativeTheme, BaseWindow, WebContentsView, ipcMain, session, protocol, BrowserWindow, dialog, shell } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { ElectronChromeExtensions } = require('electron-chrome-extensions');
+const AdmZip = require('adm-zip');
+
+const googleCompat = require('./google-compat');
+const defaultBrowser = require('./default-browser');
+const updater = require('./updater');
+
+const settings = require('./settings');
+const secrets = require('./secrets');
+const extMenu = require('./extensions-menu');
+const features = require('./features');
+const pro = require('./browser-features');
+const ai = require('./ai');
+const webstore = require('./webstore-install');
+const widevine = require('./widevine');
+const extCompat = require('./ext-compat');
+
+const RENDERER_DIR = path.join(__dirname, '../renderer');
+const PAGES_DIR = path.join(RENDERER_DIR, 'pages');
+const PRELOAD = path.join(__dirname, '../preload/preload.js');
+const WEBVIEW_PRELOAD = path.join(__dirname, '../preload/webview-preload.js');
+const USER_AGENT = googleCompat.UA;
+
+const SEARCH_ENGINES = {
+  google: (q) => 'https://www.google.com/search?q=' + encodeURIComponent(q),
+  bing: (q) => 'https://www.bing.com/search?q=' + encodeURIComponent(q),
+  duckduckgo: (q) => 'https://duckduckgo.com/?q=' + encodeURIComponent(q),
+  yahoo: (q) => 'https://search.yahoo.com/search?p=' + encodeURIComponent(q)
+};
+
+function applySearchEngine(resolvedUrl) {
+  const engineId = settings.get('search.engine') || 'google';
+  if (engineId === 'google') return resolvedUrl;
+  try {
+    const u = new URL(resolvedUrl);
+    if (/(^|\.)google\.com$/i.test(u.hostname) && u.pathname === '/search' && u.searchParams.has('q')) {
+      const build = SEARCH_ENGINES[engineId];
+      if (build) return build(u.searchParams.get('q'));
+    }
+  } catch (e) {}
+  return resolvedUrl;
+}
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'kortex', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+
+app.commandLine.appendSwitch('disable-features', 'WebContentsForceDark,WebAuthentication');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-usermedia-screen-capturing');
+app.commandLine.appendSwitch('allow-http-screen-capture');
+app.setName('Kortex');
+
+const historyPath = path.join(app.getPath('userData'), 'history.json');
+const configPath = path.join(app.getPath('userData'), 'kortex-config.json');
+let mainWindow, chromeView, overlayView, suggestView, extMenuView, ext;
+const pageViews = {};
+let activeTabId = null;
+let tabCounter = 0;
+let pageBounds = null;
+let pendingUrl = null;
+let uiReady = false;
+
+let savedExtensions = [];
+const extensionsJsonPath = path.join(app.getPath('userData'), 'extensions.json');
+try { if (fs.existsSync(extensionsJsonPath)) savedExtensions = JSON.parse(fs.readFileSync(extensionsJsonPath, 'utf8')); } catch (e) {}
+
+let disabledExtensions = [];
+const disabledExtPath = path.join(app.getPath('userData'), 'disabledExtensions.json');
+try { if (fs.existsSync(disabledExtPath)) disabledExtensions = JSON.parse(fs.readFileSync(disabledExtPath, 'utf8')); } catch (e) {}
+
+const normalizePath = (p) => { try { return path.normalize(p).toLowerCase(); } catch (e) { return String(p).toLowerCase(); } };
+const nav = (wc) => wc.navigationHistory || wc;
+
+function toast(msg) {
+  try { if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('toast', msg); } catch (e) {}
+}
+
+const KORTEX_PAGES = {
+  settings: 'settings.html', extensions: 'extensions.html', store: 'store.html', plugins: 'plugins.html',
+  history: 'library.html', bookmarks: 'library.html', downloads: 'library.html',
+  permissions: 'permissions.html', certerror: 'certerror.html'
+};
+const KORTEX_TITLES = {
+  store: 'Loja do Kortex', extensions: 'Extensões', settings: 'Definições', plugins: 'Plugins',
+  history: 'Histórico', bookmarks: 'Marcadores', downloads: 'Transferências',
+  permissions: 'Permissões dos sites', certerror: 'Ligação não privada'
+};
+const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
+
+function handleKortexRequest(request) {
+  const notFound = () => new Response('Not found', { status: 404 });
+  let url, rel;
+  try { url = new URL(request.url); rel = decodeURIComponent(url.pathname).replace(/^\/+/, ''); } catch (e) { return notFound(); }
+  const page = KORTEX_PAGES[url.hostname];
+  if (!page) return notFound();
+  if (!rel) rel = page;
+  const filePath = path.resolve(PAGES_DIR, rel);
+  if (!filePath.startsWith(PAGES_DIR + path.sep) || !fs.existsSync(filePath)) return notFound();
+  return new Response(fs.readFileSync(filePath), { headers: { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-store' } });
+}
+
+const internalTitle = (url) => { try { return KORTEX_TITLES[new URL(url).hostname] || 'Kortex'; } catch (e) { return 'Kortex'; } };
+
+function createWindow() {
+  mainWindow = new BaseWindow({ width: 1400, height: 900, frame: false, titleBarStyle: 'hidden', backgroundColor: '#0f1011' });
+  mainWindow.maximize();
+
+  chromeView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  chromeView.setBackgroundColor('#00000000');
+  mainWindow.contentView.addChildView(chromeView);
+  pro.attach(chromeView.webContents);
+  chromeView.setBounds({ x: 0, y: 0, width: 1400, height: 900 });
+  chromeView.webContents.loadFile(path.join(RENDERER_DIR, fs.existsSync(configPath) ? 'index.html' : 'setup.html'));
+
+  overlayView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  overlayView.setBackgroundColor('#00000000');
+  overlayView.setVisible(false);
+  overlayView.webContents.loadFile(path.join(RENDERER_DIR, 'overlay.html'));
+
+  suggestView = new WebContentsView({ webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  suggestView.setBackgroundColor('#00000000');
+  suggestView.setVisible(false);
+  suggestView.webContents.loadFile(path.join(RENDERER_DIR, 'suggestions.html'));
+
+  extMenuView = extMenu.create({
+    getMainWindow: () => mainWindow, getChromeView: () => chromeView, raise: () => raiseOverlays(),
+    isDisabled: (p) => disabledExtensions.some((d) => normalizePath(d) === normalizePath(p)),
+    navigateActive: (url) => navigateActive(url), toast: (msg) => toast(msg)
+  }, PRELOAD, path.join(RENDERER_DIR, 'extensions-menu.html'));
+
+  raiseOverlays();
+  fitOverlaysToWindow();
+
+  let startupDone = false;
+  chromeView.webContents.on('did-finish-load', () => {
+    if (startupDone || !fs.existsSync(configPath)) return;
+    startupDone = true;
+    const urls = settings.get('startup.mode') === 'continue' ? features.readSessionTabs() : [];
+    const startupUrl = pendingUrl || defaultBrowser.urlFromArgv(process.argv);
+    pendingUrl = null;
+    if (startupUrl) createNewTab(startupUrl);
+    else if (urls.length) urls.forEach((u) => createNewTab(u));
+    else createNewTab();
+    uiReady = true;
+  });
+  mainWindow.on('close', () => features.saveSessionTabs(() => pageViews));
+
+  const handleResize = () => { fitOverlaysToWindow(); hideSuggestions(); extMenu.hide(); };
+  mainWindow.on('resize', handleResize);
+  mainWindow.on('maximize', () => setTimeout(handleResize, 50));
+  mainWindow.on('unmaximize', () => setTimeout(handleResize, 50));
+  mainWindow.on('restore', () => setTimeout(handleResize, 50));
+}
+
+function fitOverlaysToWindow() {
+  if (!mainWindow) return;
+  const { width, height } = mainWindow.getContentBounds();
+  chromeView.setBounds({ x: 0, y: 0, width, height });
+  overlayView.setBounds({ x: 0, y: 0, width, height });
+}
+
+function raiseOverlays() {
+  mainWindow.contentView.addChildView(suggestView);
+  mainWindow.contentView.addChildView(extMenuView);
+  mainWindow.contentView.addChildView(overlayView);
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, commandLine) => {
+    const url = defaultBrowser.urlFromArgv(commandLine);
+    if (!mainWindow) { pendingUrl = url; return; }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    openFromOS(url);
+  });
+}
+
+function openFromOS(url) {
+  if (!url) return;
+  const v = pageViews[activeTabId];
+  if (!v) createNewTab(url);
+  else {
+    const cur = v.webContents.getURL();
+    if (cur === '' || cur === 'about:blank') navigateActive(url);
+    else createNewTab(url);
+  }
+}
+
+const INTERNAL_SCHEMES = new Set(['http', 'https', 'kortex', 'about', 'blob', 'data', 'javascript', 'view-source', 'file', 'filesystem', 'chrome', 'chrome-extension', 'devtools', 'ws', 'wss']);
+
+function schemeOf(u) {
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(String(u || '').trim());
+  return m ? m[1].toLowerCase() : '';
+}
+const isInternalUrl = (u) => INTERNAL_SCHEMES.has(schemeOf(u));
+
+const lastExternal = new Map();
+function openExternalUrl(url) {
+  const scheme = schemeOf(url);
+  if (!scheme || isInternalUrl(url)) return;
+  const now = Date.now();
+  if ((lastExternal.get(url) || 0) > now - 3000) return;
+  lastExternal.set(url, now);
+  if (lastExternal.size > 100) for (const [k, t] of lastExternal) if (t < now - 10000) lastExternal.delete(k);
+  shell.openExternal(url).catch((e) => {
+    console.error('[Kortex] Não foi possível abrir ' + scheme + '://', e.message || e);
+    toast('Nenhuma aplicação para abrir ' + scheme + '://');
+  });
+}
+
+function attachNavigationGuards(wc) {
+  const guard = (event, url) => {
+    try {
+      if (!url || isInternalUrl(url)) return;
+      event.preventDefault();
+      openExternalUrl(url);
+    } catch (e) {}
+  };
+  wc.on('will-frame-navigate', (event, url, isMainFrame) => guard(event, url));
+  wc.on('will-redirect', guard);
+  wc.on('will-navigate', guard);
+}
+
+const isGoogleHost = (u) => {
+  try {
+    const h = new URL(u).hostname;
+    return /(^|\.)google\.com$/i.test(h) || /(^|\.)youtube\.com$/i.test(h);
+  } catch (e) { return false; }
+};
+
+function watchAuthPopup(wc) {
+  wc.on('did-navigate', (_e, url) => {
+    if (isGoogleHost(url)) return;
+    wc.once('did-finish-load', () => {
+      setTimeout(() => {
+        try {
+          if (!wc.isDestroyed() && !isGoogleHost(wc.getURL())) {
+            const win = BrowserWindow.fromWebContents(wc);
+            if (win && !win.isDestroyed()) win.close();
+          }
+        } catch (e) {}
+      }, 400);
+    });
+  });
+}
+
+app.on('web-contents-created', (event, contents) => {
+  attachNavigationGuards(contents);
+
+  contents.setWindowOpenHandler(({ url: target }) => {
+    const gp = googleCompat.popupOptions(target);
+    if (gp) return gp;
+
+    if (/^https?:/i.test(target)) {
+      createNewTab(target);
+      return { action: 'deny' };
+    }
+
+    if (!isInternalUrl(target)) {
+      openExternalUrl(target);
+      return { action: 'deny' };
+    }
+
+    return { action: 'allow' };
+  });
+
+  contents.on('did-create-window', (win, details) => {
+    try { if (googleCompat.isGoogleAuthUrl(details.url)) watchAuthPopup(win.webContents); } catch (e) {}
+  });
+});
+
+app.whenReady().then(async () => {
+  if (!gotTheLock) return;
+
+  nativeTheme.themeSource = 'system';
+  googleCompat.install(session.defaultSession);
+
+  settings.init();
+  migrateAutofill();
+  await require('./google-session-reset').resetGoogleSession(session.defaultSession);
+  widevine.init();
+
+  protocol.handle('kortex', handleKortexRequest);
+
+  const adDomains = ['*://*.doubleclick.net/*', '*://*.google-analytics.com/*', '*://*.googlesyndication.com/*', '*://*.adservice.google.com/*', '*://*.facebook.com/tr*', '*://*.scorecardresearch.com/*', '*://*.adnxs.com/*', '*://*.quantserve.com/*', '*://*.outbrain.com/*', '*://*.taboola.com/*', '*://*.criteo.com/*', '*://*.criteo.net/*', '*://*.adroll.com/*', '*://*.amazon-adsystem.com/*', '*://*.pubmatic.com/*', '*://*.rubiconproject.com/*', '*://*.openx.net/*', '*://*.adsrvr.org/*'];
+  session.defaultSession.webRequest.onBeforeRequest({ urls: adDomains }, (details, callback) => {
+    callback({ cancel: settings.get('privacy.blockAds') !== false });
+  });
+
+  ext = new ElectronChromeExtensions({ session: session.defaultSession });
+  if (!app.isPackaged) logExtensionWorkers(session.defaultSession);
+  for (const extPath of savedExtensions) {
+    if (!disabledExtensions.some((p) => normalizePath(p) === normalizePath(extPath))) {
+      try { await session.defaultSession.extensions.loadExtension(extPath); console.log(`[Kortex] Extensão carregada: ${extPath}`); }
+      catch (e) { console.error(`[Kortex] Erro ao carregar ${extPath}:`, e.message); }
+    }
+  }
+
+  features.init({ getViews: () => pageViews });
+  webstore.init({ registerExtension: (dir) => { if (!savedExtensions.includes(dir)) { savedExtensions.push(dir); try { fs.writeFileSync(extensionsJsonPath, JSON.stringify(savedExtensions)); } catch (e) {} } } });
+  pro.init({
+    settings,
+    getMainWindow: () => mainWindow, getChromeView: () => chromeView,
+    getViews: () => pageViews, getActiveId: () => activeTabId,
+    createNewTab: (u, p) => createNewTab(u, p), closeTab: (id) => closeTab(id), switchTab: (id) => switchTab(id),
+    sendTabsToUI: () => sendTabsToUI(), historyPath
+  });
+  ai.init({
+    settings,
+    getActiveView: () => pageViews[activeTabId],
+    getAllViews: () => pageViews,
+    getSkillsPrompt: () => aplicarSkills(null, null, activeTabId, pageViews)
+  });
+
+  createWindow();
+  startTabSuspension();
+
+  updater.init({
+    getWindow: () => mainWindow,
+    onBeforeInstall: () => { try { features.saveSessionTabs(() => pageViews); } catch (e) {} }
+  });
+
+  defaultBrowser.init({
+    openUrl: (u) => { if (uiReady) openFromOS(u); else pendingUrl = u; },
+    getWindow: () => mainWindow,
+    canPrompt: () => !updater.isBlocking() && fs.existsSync(configPath),
+    handleSecondInstance: false,
+    handleColdStart: false
+  });
+});
+
+app.on('kortex:open-internal', (url) => { if (/^kortex:\/\//i.test(url)) pro.openInternal(url); });
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
+function logExtensionWorkers(ses) {
+  try {
+    ses.serviceWorkers.on('console-message', (_e, d) => console.log('[Kortex][SW]', d.message, d.sourceUrl ? `(${d.sourceUrl}:${d.lineNumber})` : ''));
+    ses.serviceWorkers.on('registration-completed', (_e, d) => console.log('[Kortex][SW] registado:', d.scope));
+  } catch (e) {}
+}
+
+ipcMain.handle('app:isDefaultBrowser', () => defaultBrowser.isDefault());
+ipcMain.handle('app:setDefaultBrowser', async () => {
+  await defaultBrowser.makeDefault();
+  return defaultBrowser.isDefault();
+});
+
+ipcMain.handle('settings:get', (e, key) => settings.get(key));
+ipcMain.handle('settings:getAll', () => settings.getAll());
+ipcMain.handle('settings:set', async (e, key, val) => { try { return await settings.set(key, val); } catch (err) { return { success: false, error: err.message }; } });
+ipcMain.handle('settings:reset', async (e, prefix) => { try { return await settings.reset(typeof prefix === 'string' ? prefix : ''); } catch (err) { return { success: false, error: err.message }; } });
+ipcMain.handle('plugins:get', () => settings.get('plugins') || {});
+ipcMain.handle('plugins:toggle', (e, id, val) => { const p = settings.get('plugins') || {}; p[id] = !!val; return settings.set('plugins', p); });
+
+ipcMain.handle('get-config', () => {
+  if (fs.existsSync(configPath)) { try { return JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) { return { name: 'Utilizador' }; } }
+  return { name: 'Utilizador' };
+});
+ipcMain.handle('profile:update', (e, data) => {
+  let c = {};
+  if (fs.existsSync(configPath)) c = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  c.name = data.name; c.username = data.username; c.avatar = data.avatar;
+  fs.writeFileSync(configPath, JSON.stringify(c));
+  chromeView.webContents.send('profile-updated', c);
+  return { success: true };
+});
+ipcMain.handle('setup:save', (e, data) => {
+  fs.writeFileSync(configPath, JSON.stringify(data));
+  chromeView.webContents.loadFile(path.join(RENDERER_DIR, 'index.html'));
+  return true;
+});
+
+function sendTabsToUI() {
+  const list = Object.keys(pageViews).concat(Object.keys(suspended)).map((id) => {
+    if (!pageViews[id]) { const s = suspended[id]; return pro.tabInfo(id, { id, title: s.title, url: s.url, isPrivate: s.isPrivate, suspended: true }); }
+    const view = pageViews[id];
+    const url = view.webContents.getURL();
+    let title = (view.webContents.getTitle() || '').trim();
+    if (url.startsWith('kortex://')) {
+      title = internalTitle(url);
+    } else if (url === 'about:blank' || url === '') {
+      title = view.isPrivate ? 'Navegação Privada' : 'Novo separador';
+    } else if (!title || title === 'K' || title === 'Kortex') {
+      try { title = new URL(url).hostname.replace('www.', ''); } catch (e) { title = 'A carregar...'; }
+    }
+    return pro.tabInfo(id, { id, title, url, isPrivate: view.isPrivate || false });
+  });
+  list.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('tabs:updated-list', { tabs: list, activeId: activeTabId });
+}
+
+function updateTabVisibility() {
+  const view = pageViews[activeTabId];
+  if (!view) return;
+  const url = view.webContents.getURL();
+  const isHome = url === 'about:blank' || url === '';
+  view.setVisible(!isHome);
+  chromeView.webContents.send('show-home', isHome);
+}
+
+function applyBounds(view) {
+  if (view && pageBounds) view.setBounds(pageBounds);
+}
+
+function createNewTab(url = 'about:blank', isPrivate = false) {
+  tabCounter++;
+  const id = 'tab-' + tabCounter;
+  let tabSession = session.defaultSession;
+  if (isPrivate) {
+    tabSession = session.fromPartition('private-' + Date.now(), { cache: false });
+    googleCompat.applySession(tabSession, true);
+    tabSession.protocol.handle('kortex', handleKortexRequest);
+    pro.setupSession(tabSession);
+  }
+
+  const view = new WebContentsView({ webPreferences: { session: tabSession, preload: WEBVIEW_PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: false, plugins: true } });
+  mainWindow.contentView.addChildView(view);
+  raiseOverlays();
+
+  pageViews[id] = view;
+  view.isPrivate = isPrivate;
+  view.setBackgroundColor('#00000000');
+  applyBounds(view);
+  view.webContents.loadURL(url).catch(() => {});
+
+  pro.attachView(id, view);
+  webstore.attachView(view);
+  view.webContents.on('dom-ready', () => features.applyZoom(view.webContents));
+  view.webContents.on('page-title-updated', () => sendTabsToUI());
+  view.webContents.on('did-navigate', () => { updateTabVisibility(); sendTabsToUI(); saveToHistory(view.webContents.getTitle(), view.webContents.getURL()); });
+  view.webContents.on('did-finish-load', () => { view.webContents.invalidate(); });
+
+  if (ext && !isPrivate) ext.addTab(view.webContents, mainWindow);
+  switchTab(id);
+  return id;
+}
+
+function switchTab(id) {
+  if (suspended[id]) reviveSuspendedTab(id);
+  hideSuggestions();
+  extMenu.hide();
+  if (activeTabId && pageViews[activeTabId]) pageViews[activeTabId].setVisible(false);
+  activeTabId = id;
+  if (pageViews[id]) { applyBounds(pageViews[id]); updateTabVisibility(); pageViews[id].webContents.focus(); }
+  sendTabsToUI();
+  markActive(id);
+}
+
+function closeTab(id) {
+  if (pageViews[id]) {
+    pro.onClose(pageViews[id]);
+    if (ext && !pageViews[id].isPrivate) ext.removeTab(pageViews[id].webContents);
+    mainWindow.contentView.removeChildView(pageViews[id]);
+    pageViews[id].webContents.close();
+    delete pageViews[id];
+  }
+  if (activeTabId === id) {
+    const rest = Object.keys(pageViews);
+    if (rest.length > 0) switchTab(rest[rest.length - 1]); else createNewTab();
+  }
+  sendTabsToUI();
+}
+
+function navigateActive(url) {
+  const view = pageViews[activeTabId];
+  if (!view) return;
+  view.webContents.loadURL(url).catch(() => {});
+  updateTabVisibility();
+}
+
+ipcMain.handle('tabs:create', (e, url) => createNewTab(url || 'about:blank'));
+ipcMain.handle('tabs:create-private', () => createNewTab('about:blank', true));
+ipcMain.handle('tabs:close', (e, id) => { closeTab(id); return true; });
+ipcMain.handle('tabs:activate', (e, id) => { switchTab(id); return true; });
+ipcMain.handle('tabs:open-internal', (e, url) => {
+  if (typeof url !== 'string' || !/^kortex:\/\//i.test(url)) return false;
+  pro.openInternal(url);
+  return true;
+});
+ipcMain.handle('tabs:reorder', (e, ids) => {
+  if (!Array.isArray(ids)) return false;
+  const known = Object.keys(pageViews);
+  const order = ids.filter((id) => known.includes(id));
+  if (order.length !== known.length || new Set(order).size !== order.length) return false;
+  const entries = order.map((id) => [id, pageViews[id]]);
+  known.forEach((id) => delete pageViews[id]);
+  entries.forEach(([id, v]) => { pageViews[id] = v; });
+  sendTabsToUI();
+  return true;
+});
+ipcMain.handle('tab:navigate', async (e, id, url) => { navigateActive(url); return true; });
+ipcMain.handle('tab:back', () => { const v = pageViews[activeTabId]; if (v && nav(v.webContents).canGoBack()) nav(v.webContents).goBack(); return true; });
+ipcMain.handle('tab:forward', () => { const v = pageViews[activeTabId]; if (v && nav(v.webContents).canGoForward()) nav(v.webContents).goForward(); return true; });
+ipcMain.handle('tab:reload', () => { const v = pageViews[activeTabId]; if (v) v.webContents.reload(); return true; });
+ipcMain.on('layout:page-bounds', (e, b) => {
+  pageBounds = { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };
+  const view = pageViews[activeTabId];
+  if (view) { view.setBounds(pageBounds); view.webContents.invalidate(); }
+});
+
+const SUGGEST_ROW_H = 40;
+const SUGGEST_MAX_H = 360;
+
+function hideSuggestions() {
+  if (suggestView && !suggestView.webContents.isDestroyed()) suggestView.setVisible(false);
+}
+
+ipcMain.handle('omnibox:go', async (e, text) => {
+  const view = pageViews[activeTabId];
+  if (!view) return false;
+  hideSuggestions();
+  navigateActive(applySearchEngine(settings.resolveInput(text)));
+  return true;
+});
+
+const normalizeSuggestion = (it) => (it && typeof it === 'object'
+  ? { text: String(it.text || ''), label: String(it.label || it.text || ''), tabId: typeof it.tabId === 'string' ? it.tabId : undefined }
+  : { text: String(it), label: String(it) });
+
+ipcMain.on('suggest:show', (e, payload) => {
+  if (e.sender !== chromeView.webContents) return;
+  const { items, selected, rect } = payload || {};
+  if (!Array.isArray(items) || !items.length || !rect) { hideSuggestions(); return; }
+  const height = Math.min(items.length * SUGGEST_ROW_H + 12, SUGGEST_MAX_H);
+  suggestView.setBounds({ x: Math.round(rect.x), y: Math.round(rect.y + rect.height + 4), width: Math.round(rect.width), height });
+  mainWindow.contentView.addChildView(suggestView);
+  mainWindow.contentView.addChildView(overlayView);
+  suggestView.webContents.send('suggest:render', { items: items.map(normalizeSuggestion), selected: Number.isInteger(selected) ? selected : -1 });
+  suggestView.setVisible(true);
+});
+ipcMain.on('suggest:hide', (e) => { if (e.sender === chromeView.webContents) hideSuggestions(); });
+ipcMain.on('suggest:pick', (e, item) => {
+  if (e.sender !== suggestView.webContents) return;
+  hideSuggestions();
+  if (item && typeof item === 'object' && pageViews[item.tabId]) switchTab(item.tabId);
+  else navigateActive(applySearchEngine(settings.resolveInput(String(item && item.text !== undefined ? item.text : item))));
+  chromeView.webContents.send('omnibox:picked');
+});
+
+ipcMain.handle('get-suggestions', async (e, query) => {
+  if (settings.get('privacy.suggestions') === false) return [];
+  try {
+    const res = await fetch('https://suggestqueries.google.com/complete/search?client=chrome&q=' + encodeURIComponent(query), { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const data = await res.json();
+    return data[1] || [];
+  } catch (err) { return []; }
+});
+
+ipcMain.on('extensions-popup:show', () => navigateActive('kortex://extensions'));
+ipcMain.on('extensions-popup:manage', () => { overlayView.setVisible(false); navigateActive('kortex://extensions'); });
+ipcMain.on('extensions-popup:click-ext', (e, extId) => { overlayView.setVisible(false); extMenu.openPopup(extId); });
+
+const MENU_TARGETS = {
+  'open-settings': 'kortex://settings', 'open-history': 'kortex://history', 'open-downloads': 'kortex://downloads',
+  'open-bookmarks': 'kortex://bookmarks', 'open-extensions': 'kortex://extensions'
+};
+ipcMain.on('menu:open', (e, { x, y }) => { overlayView.setVisible(true); mainWindow.contentView.addChildView(overlayView); overlayView.webContents.send('menu:state', { x, y }); });
+ipcMain.on('menu:close', () => { overlayView.setVisible(false); chromeView.webContents.send('menu:closed'); });
+ipcMain.on('menu:action', (e, action) => {
+  overlayView.setVisible(false);
+  chromeView.webContents.send('menu:closed');
+  if (action === 'quit') { mainWindow.close(); return; }
+  if (MENU_TARGETS[action]) navigateActive(MENU_TARGETS[action]);
+});
+
+ipcMain.on('window:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+ipcMain.on('window:maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+ipcMain.on('window:close', () => { if (mainWindow) mainWindow.close(); });
+
+ipcMain.handle('ext:load-unpacked', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
+  if (canceled) return { success: false };
+  const extPath = filePaths[0];
+  try {
+    const ex = await session.defaultSession.extensions.loadExtension(extPath);
+    if (!savedExtensions.includes(extPath)) { savedExtensions.push(extPath); fs.writeFileSync(extensionsJsonPath, JSON.stringify(savedExtensions)); }
+    const compat = extCompat.check(extPath);
+    if (compat.level !== 'ok') toast(extCompat.MSG_AVISO);
+    return { success: true, ext: { id: ex.id, name: ex.name, version: ex.version, path: ex.path }, compat };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+ipcMain.handle('ext:list', () => {
+  const dn = disabledExtensions.map(normalizePath);
+  const active = session.defaultSession.extensions.getAllExtensions().filter((e) => !dn.includes(normalizePath(e.path))).map((e) => ({ id: e.id, name: e.name, version: e.version, path: e.path, description: e.manifest?.description || 'Sem descrição.', disabled: false, compat: extCompat.check(e.path) }));
+  const dis = disabledExtensions.map((p) => {
+    let name = path.basename(p), version = '1.0', description = 'Extensão desativada.';
+    try { const m = JSON.parse(fs.readFileSync(path.join(p, 'manifest.json'), 'utf8')); name = m.name || name; version = m.version || version; description = m.description || description; } catch (e) {}
+    const uid = 'disabled-' + crypto.createHash('sha1').update(normalizePath(p)).digest('hex').slice(0, 12);
+    return { id: uid, name, version, path: p, description, disabled: true, compat: extCompat.check(p) };
+  });
+  return [...active, ...dis];
+});
+ipcMain.handle('ext:toggle', async (e, id, pathStr, enable) => {
+  if (!pathStr) return { success: false, error: 'Caminho inválido.' };
+  const np = normalizePath(pathStr);
+  if (enable) {
+    const already = session.defaultSession.extensions.getAllExtensions().find((ex) => normalizePath(ex.path) === np);
+    if (!already) { try { await session.defaultSession.extensions.loadExtension(pathStr); } catch (err) { return { success: false, error: err.message }; } }
+    disabledExtensions = disabledExtensions.filter((p) => normalizePath(p) !== np);
+    fs.writeFileSync(disabledExtPath, JSON.stringify(disabledExtensions));
+    return { success: true };
+  }
+  if (!disabledExtensions.some((p) => normalizePath(p) === np)) { disabledExtensions.push(pathStr); fs.writeFileSync(disabledExtPath, JSON.stringify(disabledExtensions)); }
+  const loaded = session.defaultSession.extensions.getAllExtensions().find((ex) => normalizePath(ex.path) === np);
+  if (loaded) { try { session.defaultSession.extensions.removeExtension(loaded.id); } catch (err) {} }
+  return { success: true };
+});
+ipcMain.handle('ext:reload', async (e, id, pathStr) => {
+  const np = normalizePath(pathStr);
+  const loaded = session.defaultSession.extensions.getAllExtensions().find((ex) => normalizePath(ex.path) === np);
+  if (!loaded) return { success: false, error: 'Extensão não está ativa.' };
+  try {
+    session.defaultSession.extensions.removeExtension(loaded.id);
+    await new Promise((r) => setTimeout(r, 200));
+    await session.defaultSession.extensions.loadExtension(pathStr);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+ipcMain.handle('ext:remove', async (e, id, pathStr) => {
+  try {
+    const np = normalizePath(pathStr);
+    savedExtensions = savedExtensions.filter((p) => normalizePath(p) !== np);
+    disabledExtensions = disabledExtensions.filter((p) => normalizePath(p) !== np);
+    fs.writeFileSync(extensionsJsonPath, JSON.stringify(savedExtensions));
+    fs.writeFileSync(disabledExtPath, JSON.stringify(disabledExtensions));
+    const ex = session.defaultSession.extensions.getExtension(id);
+    if (ex) session.defaultSession.extensions.removeExtension(id);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+ipcMain.handle('ext:get-details', async (e, id, pathStr) => {
+  let extPath = pathStr;
+  const ex = session.defaultSession.extensions.getExtension(id);
+  if (ex) extPath = ex.path;
+  if (!extPath) return { success: false, error: 'Caminho não encontrado.' };
+  try {
+    const m = ex ? (ex.manifest || {}) : JSON.parse(fs.readFileSync(path.join(extPath, 'manifest.json'), 'utf8'));
+    const dirSize = (dir) => { let s = 0; try { fs.readdirSync(dir).forEach((f) => { const p = path.join(dir, f); s += fs.statSync(p).isDirectory() ? dirSize(p) : fs.statSync(p).size; }); } catch (e2) {} return s; };
+    const sb = dirSize(extPath);
+    const size = sb > 1024 * 1024 ? (sb / (1024 * 1024)).toFixed(1) + ' MB' : (sb > 1024 ? (sb / 1024).toFixed(1) + ' KB' : sb + ' Bytes');
+    let perms = m.permissions || [];
+    let host = m.host_permissions || [];
+    if (m.manifest_version === 2) { host = host.concat(perms.filter((p) => p.includes('://'))); perms = perms.filter((p) => !p.includes('://')); }
+    return { success: true, name: ex ? ex.name : (m.name || 'Desconhecido'), description: m.description || 'Sem descrição.', version: ex ? ex.version : (m.version || '1.0'), id, path: extPath, size, permissions: perms, hostPermissions: host, compat: extCompat.check(extPath) };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+ipcMain.handle('ext:read-code', (e, extPath) => { try { return fs.readFileSync(path.join(extPath, 'manifest.json'), 'utf8'); } catch (err) { return `// Erro: ${err.message}`; } });
+ipcMain.handle('ext:compat', (e, extPath) => extCompat.check(extPath));
+
+ipcMain.handle('webstore:search', async (e, query) => {
+  try {
+    const response = await fetch('https://chromewebstore.google.com/search/' + encodeURIComponent(query) + '?hl=pt-PT', { headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.8' } });
+    const html = await response.text();
+    const results = []; const seen = new Set();
+    const regex = /\/detail\/([^/"']+)\/([a-p]{32})/g;
+    let match;
+    while ((match = regex.exec(html)) !== null) {
+      const rawSlug = match[1]; const id = match[2];
+      if (!seen.has(id)) {
+        seen.add(id);
+        let d = rawSlug; try { d = decodeURIComponent(rawSlug); } catch (e2) {}
+        const name = d.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        results.push({ id, name, img: `https://lh3.googleusercontent.com/${id}=s128` });
+      }
+      if (results.length >= 100) break;
+    }
+    return results;
+  } catch (err) { return []; }
+});
+ipcMain.handle('webstore:get-icon', async (e, id) => {
+  try {
+    const response = await fetch('https://chromewebstore.google.com/detail/' + id, { headers: { 'User-Agent': USER_AGENT } });
+    const html = await response.text();
+    const match = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/);
+    if (match && match[1]) { let i = match[1]; if (!i.includes('=s')) i += '=s128'; return i; }
+  } catch (err) {}
+  return null;
+});
+ipcMain.handle('webstore:install', async (e, extId) => {
+  try {
+    const extDir = path.join(app.getPath('userData'), 'extensions', extId);
+    if (fs.existsSync(extDir)) {
+      await session.defaultSession.extensions.loadExtension(extDir);
+      return { success: true, message: 'Extensão já instalada.' };
+    }
+    const crxUrl = `https://clients2.google.com/service/update2/crx?response=redirect&prodversion=${googleCompat.MAJOR}.0.0.0&acceptformat=crx3&x=id%3D${extId}%26uc`;
+    const response = await fetch(crxUrl, { headers: { 'User-Agent': USER_AGENT } });
+    if (!response.ok) throw new Error('Falha ao descarregar da Google.');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const zipStart = buffer.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    if (zipStart < 0) throw new Error('Formato de ficheiro inválido.');
+    fs.mkdirSync(extDir, { recursive: true });
+    new AdmZip(buffer.subarray(zipStart)).extractAllTo(extDir, true);
+    if (!savedExtensions.includes(extDir)) { savedExtensions.push(extDir); fs.writeFileSync(extensionsJsonPath, JSON.stringify(savedExtensions)); }
+    const loaded = await session.defaultSession.extensions.loadExtension(extDir);
+    const compat = extCompat.check(extDir);
+    if (compat.level !== 'ok') toast(extCompat.MSG_AVISO);
+    return { success: true, name: loaded.name, compat };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+function saveToHistory(title, url) {
+  if (!url || url === 'about:blank' || url.startsWith('kortex://') || url.startsWith('data:')) return;
+  let history = [];
+  if (fs.existsSync(historyPath)) { try { history = JSON.parse(fs.readFileSync(historyPath, 'utf8')); } catch (e) {} }
+  const i = history.findIndex((h) => h.url === url);
+  if (i > -1) { history[i].visitCount = (history[i].visitCount || 1) + 1; history[i].title = title || history[i].title; history[i].date = Date.now(); const it = history.splice(i, 1)[0]; history.unshift(it); }
+  else history.unshift({ title: title || url, url, date: Date.now(), visitCount: 1 });
+  if (history.length > 5000) history = history.slice(0, 5000);
+  fs.writeFileSync(historyPath, JSON.stringify(history));
+  if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('history:updated');
+}
+ipcMain.handle('history:get', () => { if (fs.existsSync(historyPath)) { try { return JSON.parse(fs.readFileSync(historyPath, 'utf8')); } catch (e) { return []; } } return []; });
+ipcMain.handle('history:getTopSites', () => {
+  if (!fs.existsSync(historyPath)) return [];
+  try { const h = JSON.parse(fs.readFileSync(historyPath, 'utf8')); h.sort((a, b) => (b.visitCount || 1) - (a.visitCount || 1)); return h.slice(0, 5); } catch (e) { return []; }
+});
+
+const autofillPath = path.join(app.getPath('userData'), 'autofill.json');
+const readAutofill = () => { try { return fs.existsSync(autofillPath) ? JSON.parse(fs.readFileSync(autofillPath, 'utf8')) : null; } catch (e) { return null; } };
+const writeAutofill = (db) => fs.writeFileSync(autofillPath, JSON.stringify(db));
+
+function migrateAutofill() {
+  const db = readAutofill();
+  if (!db || !secrets.available()) return;
+  let changed = false;
+  for (const domain of Object.keys(db)) {
+    const entry = db[domain];
+    if (entry && typeof entry.password === 'string' && entry.password && !secrets.isEncrypted(entry.password)) {
+      entry.password = secrets.encrypt(entry.password);
+      changed = true;
+    }
+  }
+  if (changed) { writeAutofill(db); console.log('[Kortex] palavras-passe migradas para armazenamento cifrado'); }
+}
+
+function splitCsvLine(line) {
+  const out = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQ) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else inQ = false; } else cur += c; }
+    else if (c === '"') inQ = true;
+    else if (c === ',') { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+function parseChromePasswordsCsv(text) {
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return [];
+  const header = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+  const urlIdx = header.indexOf('url'), userIdx = header.indexOf('username'), passIdx = header.indexOf('password');
+  if (urlIdx < 0 || passIdx < 0) return [];
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i]);
+    const url = cols[urlIdx], password = cols[passIdx];
+    if (!url || !password) continue;
+    try { out.push({ domain: new URL(url).hostname, username: userIdx >= 0 ? cols[userIdx] : '', password }); } catch (e) {}
+  }
+  return out;
+}
+ipcMain.handle('import:passwords', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'], filters: [{ name: 'Palavras-passe do Chrome', extensions: ['csv'] }]
+  });
+  if (canceled || !filePaths[0]) return { success: false };
+  let rows;
+  try { rows = parseChromePasswordsCsv(fs.readFileSync(filePaths[0], 'utf8')); } catch (err) { return { success: false, error: err.message }; }
+  const db = readAutofill() || {};
+  let imported = 0;
+  for (const r of rows) {
+    const enc = secrets.encrypt(r.password);
+    if (enc === null) continue;
+    db[r.domain] = { username: r.username, password: enc };
+    imported++;
+  }
+  writeAutofill(db);
+  return { success: true, imported, total: rows.length };
+});
+
+ipcMain.handle('autofill:get', (e, domain) => {
+  const db = readAutofill();
+  const entry = db && db[domain];
+  if (!entry) return null;
+  return { username: entry.username, password: secrets.decrypt(entry.password).value };
+});
+ipcMain.handle('autofill:list', () => {
+  const db = readAutofill() || {};
+  const out = {};
+  for (const domain of Object.keys(db)) out[domain] = { username: db[domain].username };
+  return out;
+});
+ipcMain.handle('autofill:delete', (e, domain) => { const db = readAutofill(); if (!db) return false; delete db[domain]; writeAutofill(db); return true; });
+
+ipcMain.on('autofill:prompt-save', (e, { domain, username, password }) => {
+  const bounds = mainWindow.getBounds();
+  const win = new BrowserWindow({ width: 360, height: 220, x: Math.round(bounds.x + (bounds.width / 2) - 180), y: Math.round(bounds.y + (bounds.height / 2) - 110), frame: false, resizable: false, alwaysOnTop: true, backgroundColor: '#1a1b1d', webPreferences: { nodeIntegration: true, contextIsolation: false } });
+  const ds = encodeURIComponent(JSON.stringify({ domain, username, password }));
+  const safeDomain = String(domain).replace(/[<>&"']/g, '');
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+    <body style="font-family:sans-serif;color:white;padding:20px;text-align:center;background:#1a1b1d;margin:0">
+    <h3>Guardar Palavra-passe?</h3>
+    <p style="font-size:13px;color:#888">O Kortex quer guardar os dados para <b>${safeDomain}</b>.</p>
+    <button id="yes" style="background:#ff5722;color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;margin-right:10px">Sim</button>
+    <button id="no" style="background:#38393d;color:white;padding:10px 20px;border-radius:6px;cursor:pointer">Não</button>
+    <script>const{ipcRenderer}=require('electron');const d=JSON.parse(decodeURIComponent("${ds}"));document.getElementById('yes').onclick=()=>{ipcRenderer.send('autofill:do-save',d);window.close();};document.getElementById('no').onclick=()=>window.close();</script>
+    </body>
+  `)}`);
+});
+ipcMain.on('autofill:do-save', (e, data) => {
+  const db = readAutofill() || {};
+  const enc = secrets.encrypt(data.password);
+  if (enc === null) { console.warn('[Kortex] cifra indisponível: palavra-passe não guardada'); return; }
+  db[data.domain] = { username: data.username, password: enc };
+  writeAutofill(db);
+});
+
+ipcMain.handle('clear-data:stats', async () => {
+  const c = await session.defaultSession.getCacheSize();
+  const ck = await session.defaultSession.cookies.get({});
+  const cacheSize = c > 1024 * 1024 ? (c / (1024 * 1024)).toFixed(1) + ' MB' : (c > 1024 ? (c / 1024).toFixed(1) + ' KB' : '0 KB');
+  let historyCount = 0;
+  try { historyCount = JSON.parse(fs.readFileSync(historyPath, 'utf8')).length; } catch (e) {}
+  return { cacheSize, cookiesCount: ck.length, historyCount };
+});
+ipcMain.handle('clear-data:execute', async (e, options) => {
+  if (options.cookies) {
+    if (options.timeRange === 'all') await session.defaultSession.clearStorageData({ storages: ['cookies'] });
+    else {
+      const ck = await session.defaultSession.cookies.get({}); const now = Math.floor(Date.now() / 1000);
+      const tl = options.timeRange === '15m' ? 900 : (options.timeRange === '1h' ? 3600 : 86400);
+      for (const c of ck) { if (c.creationDate && (now - c.creationDate <= tl)) await session.defaultSession.cookies.remove(`http${c.secure ? 's' : ''}://${c.domain}${c.path}`, c.name); }
+    }
+  }
+  if (options.cache) await session.defaultSession.clearCache();
+  if (options.hostedApps) await session.defaultSession.clearStorageData({ storages: ['localstorage', 'indexdb', 'websql', 'serviceworkers'] });
+  if (options.autofill) { if (fs.existsSync(autofillPath)) fs.writeFileSync(autofillPath, JSON.stringify({})); }
+  if (options.history) {
+    let h = []; try { h = JSON.parse(fs.readFileSync(historyPath, 'utf8')); } catch (e) {}
+    const limits = { '15m': 15 * 60e3, '1h': 3600e3 };
+    const keep = options.timeRange === 'all' ? [] : h.filter((i) => Date.now() - (i.date || 0) > (limits[options.timeRange] || 86400e3));
+    fs.writeFileSync(historyPath, JSON.stringify(keep));
+  }
+  return true;
+});
+
+async function aplicarSkills(messages, appSettings, tabId, views) {
+  let systemPrompt = 'És o Kortex, um assistente AI focado em ajudar o utilizador.';
+  const tools = settings.get('plugins') || {};
+  let pageContext = '';
+  let pageAccessBlocked = false;
+
+  if (tabId && views && views[tabId]) {
+    try {
+      const view = views[tabId];
+      const url = view.webContents.getURL();
+      if (url.startsWith('http')) {
+        if (view.isPrivate || !settings.get('assistant.pageAccess')) pageAccessBlocked = true;
+        else pageContext = await view.webContents.executeJavaScript('document.body.innerText.substring(0, 15000)');
+      }
+    } catch (e) {}
+  }
+
+  if (pageAccessBlocked) systemPrompt += '\n\n[AVISO] O utilizador nao permitiu que leias a pagina.';
+  if (pageContext) systemPrompt += `\n\n[CONTEXTO DA PAGINA ABERTA]\n"""\n${pageContext}\n"""\n`;
+
+  if (tools['code-reviewer']) systemPrompt += '\n\n[SKILL: Code Reviewer] Analisa o codigo fornecido, aponta bugs, sugere otimizacoes.';
+  if (tools['regex-wizard']) systemPrompt += '\n\n[SKILL: Regex Wizard] Gera Expressoes Regulares perfeitas.';
+  if (tools['sql-expert']) systemPrompt += '\n\n[SKILL: SQL Expert] Cria queries SQL robustas.';
+  if (tools['docker-helper']) systemPrompt += '\n\n[SKILL: Docker Expert] Ajuda com Dockerfiles.';
+  if (tools['git-assistant']) systemPrompt += '\n\n[SKILL: Git Assistant] Resolve problemas de Git.';
+  if (tools['email-writer']) systemPrompt += '\n\n[SKILL: Email Writer] Escreve emails profissionais.';
+  if (tools['swot-analyzer']) systemPrompt += '\n\n[SKILL: SWOT] Cria uma analise SWOT.';
+  if (tools['copywriter']) systemPrompt += '\n\n[SKILL: Copywriter] Escreve copy de vendas.';
+  if (tools['stock-analyst']) systemPrompt += '\n\n[SKILL: Analista de Acoes] Fornece analises financeiras.';
+  if (tools['crypto-tracker']) systemPrompt += '\n\n[SKILL: Crypto Tracker] Ajuda com criptomoedas.';
+  if (tools['tax-helper']) systemPrompt += '\n\n[SKILL: Fiscal] Ajuda a calcular impostos.';
+
+  if (tools['summarize-page'] && pageContext) systemPrompt += '\n\n[SKILL: Resumir] Cria um resumo da pagina aberta.';
+  if (tools['extract-data'] && pageContext) systemPrompt += '\n\n[SKILL: Extrair Dados] Extrai dados da pagina para JSON.';
+  if (tools['translate-page'] && pageContext) systemPrompt += '\n\n[SKILL: Traduzir] Traduz o conteudo da pagina para Portugues.';
+  if (tools['competitor-analysis'] && pageContext) systemPrompt += '\n\n[SKILL: Analise de Concorrencia] Analisa a pagina como um concorrente.';
+  if (tools['seo-analyzer'] && pageContext) systemPrompt += '\n\n[SKILL: SEO] Sugere melhorias de SEO para a pagina.';
+  if (tools['price-extractor'] && pageContext) systemPrompt += '\n\n[SKILL: Extrator de Precos] Extrai produtos e precos da pagina.';
+  if (tools['review-analyzer'] && pageContext) systemPrompt += '\n\n[SKILL: Analisar Reviews] Analisa o sentimento das reviews na pagina.';
+  if (tools['invoice-parser'] && pageContext) systemPrompt += '\n\n[SKILL: Faturas] Extrai dados de fatura da pagina.';
+
+  if (tools['web-search']) systemPrompt += '\n\n[PLUGIN: Pesquisa Web] Se precisares de info recente, responde com: {"action": "search", "query": "termo"}';
+
+  return systemPrompt;
+}
+
+settings.onChanged((key, value) => {
+  try {
+    if (chromeView && !chromeView.webContents.isDestroyed()) chromeView.webContents.send('settings:changed', { key, value });
+    if (overlayView && !overlayView.webContents.isDestroyed()) overlayView.webContents.send('settings:changed', { key, value });
+    if (activeTabId && pageViews[activeTabId]) pageViews[activeTabId].webContents.send('settings:changed', { key, value });
+  } catch (e) {}
+});
+
+--- FIM DO FICHEIRO: src\main\main.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\browser-features.js ---
+=============================================================
+// src/main/browser-features.js — funcionalidades de navegador "a sério" para o Kortex
+const { app, session, ipcMain, Menu, dialog, shell, clipboard, BrowserWindow, desktopCapturer } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { applyContrastFix } = require('./contrast-fix');
+
+let ctx = null;
+const file = (n) => path.join(app.getPath('userData'), n);
+const readJson = (n, d) => { try { return JSON.parse(fs.readFileSync(file(n), 'utf8')); } catch (e) { return d; } };
+const writeJson = (n, v) => { try { fs.writeFileSync(file(n), JSON.stringify(v)); } catch (e) {} };
+const toChrome = (ch, data) => { const cv = ctx && ctx.getChromeView(); if (cv && !cv.webContents.isDestroyed()) cv.webContents.send(ch, data); };
+const views = () => ctx.getViews();
+const active = () => views()[ctx.getActiveId()];
+const note = (m) => toChrome('toast', m);
+const navOf = (wc) => wc.navigationHistory || wc;
+let refreshTimer = null;
+const refresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => ctx.sendTabsToUI(), 60); };
+
+// ... (Marcadores, Histórico, Downloads, Permissões, etc. mantidos resumidos para o script caber) ...
+
+/* ---------------- Marcadores ---------------- */
+let bookmarks = null;
+const bm = () => (bookmarks = bookmarks || readJson('bookmarks.json', []));
+function toggleBookmark(url, title) {
+  if (!/^(https?:|kortex:)/i.test(url || '')) return { ok: false };
+  const list = bm(); const i = list.findIndex((b) => b.url === url);
+  if (i > -1) list.splice(i, 1); else list.push({ id: crypto.randomUUID(), url, title: title || url, added: Date.now() });
+  writeJson('bookmarks.json', list); toChrome('bookmarks:changed');
+  return { ok: true, bookmarked: i === -1 };
+}
+function parseNetscapeBookmarks(html) {
+  const out = [];
+  const re = /<A[^>]*HREF="([^"]+)"[^>]*>([^<]*)<\/A>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const url = m[1].trim();
+    const title = (m[2] || '').trim() || url;
+    if (/^https?:\/\//i.test(url)) out.push({ url, title });
+  }
+  return out;
+}
+
+function setupImports() {
+  ipcMain.handle('import:bookmarks', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(ctx.getMainWindow(), {
+      properties: ['openFile'], filters: [{ name: 'Favoritos (HTML)', extensions: ['html', 'htm'] }]
+    });
+    if (canceled || !filePaths[0]) return { success: false };
+    try {
+      const html = fs.readFileSync(filePaths[0], 'utf8');
+      const imported = parseNetscapeBookmarks(html);
+      const list = bm();
+      let added = 0;
+      for (const b of imported) {
+        if (!list.find((x) => x.url === b.url)) {
+          list.push({ id: crypto.randomUUID(), url: b.url, title: b.title, added: Date.now() });
+          added++;
+        }
+      }
+      writeJson('bookmarks.json', list);
+      toChrome('bookmarks:changed');
+      return { success: true, imported: added, total: imported.length };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+}
+
+function setupBookmarks() {
+  ipcMain.handle('bookmarks:list', () => bm());
+  ipcMain.handle('bookmarks:is', (e, url) => bm().some((b) => b.url === url));
+  ipcMain.handle('bookmarks:toggle', (e, { url, title } = {}) => toggleBookmark(url, title));
+  ipcMain.handle('bookmarks:setFolder', (e, id, folder) => {
+    const b = bm().find((x) => x.id === id); if (!b) return false;
+    const name = String(folder || '').trim().slice(0, 40); if (name) b.folder = name; else delete b.folder;
+    writeJson('bookmarks.json', bm()); toChrome('bookmarks:changed'); return true;
+  });
+  ipcMain.handle('bookmarks:remove', (e, id) => { bookmarks = bm().filter((b) => b.id !== id); writeJson('bookmarks.json', bookmarks); toChrome('bookmarks:changed'); return true; });
+}
+
+/* ---------------- Histórico ---------------- */
+function setupHistory() {
+  const read = () => { try { return JSON.parse(fs.readFileSync(ctx.historyPath, 'utf8')); } catch (e) { return []; } };
+  ipcMain.handle('history:remove', (e, url) => { fs.writeFileSync(ctx.historyPath, JSON.stringify(read().filter((h) => h.url !== url))); toChrome('history:updated'); return true; });
+  ipcMain.handle('history:clear', () => { fs.writeFileSync(ctx.historyPath, '[]'); toChrome('history:updated'); return true; });
+}
+
+/* ---------------- Transferências ---------------- */
+const downloads = []; const dlItems = new Map();
+function setupDownloads() {
+  readJson('downloads.json', []).forEach((d) => downloads.push(d.state === 'progressing' ? { ...d, state: 'interrupted' } : d));
+  session.defaultSession.on('will-download', (e, item) => {
+    const d = { id: crypto.randomUUID(), name: item.getFilename(), url: item.getURL(), total: item.getTotalBytes(), received: 0, state: 'progressing', path: '', date: Date.now() };
+    downloads.unshift(d); dlItems.set(d.id, item); const push = () => toChrome('downloads:updated', d); push();
+    item.on('updated', (_e, state) => { d.received = item.getReceivedBytes(); d.total = item.getTotalBytes(); d.state = state === 'interrupted' ? 'interrupted' : (item.isPaused() ? 'paused' : 'progressing'); d.path = item.getSavePath() || d.path; push(); });
+    item.once('done', (_e, state) => { d.state = state; d.received = item.getReceivedBytes(); d.path = item.getSavePath() || d.path; dlItems.delete(d.id); writeJson('downloads.json', downloads.slice(0, 200)); push(); if (state === 'completed') note('Download concluído: ' + d.name); });
+  });
+  ipcMain.handle('downloads:list', () => downloads.slice(0, 200));
+  ipcMain.handle('downloads:open', (e, id) => { const d = downloads.find((x) => x.id === id); if (d && d.path && fs.existsSync(d.path)) return shell.openPath(d.path); });
+  ipcMain.handle('downloads:show', (e, id) => { const d = downloads.find((x) => x.id === id); if (d && d.path) shell.showItemInFolder(d.path); return true; });
+  ipcMain.handle('downloads:pause', (e, id) => { const it = dlItems.get(id); const d = downloads.find((x) => x.id === id); if (it && d && !it.isPaused()) { it.pause(); d.state = 'paused'; toChrome('downloads:updated', d); } return true; });
+  ipcMain.handle('downloads:resume', (e, id) => { const it = dlItems.get(id); const d = downloads.find((x) => x.id === id); if (it && d && it.canResume()) { it.resume(); d.state = 'progressing'; toChrome('downloads:updated', d); } return true; });
+  ipcMain.handle('downloads:cancel', (e, id) => { const it = dlItems.get(id); if (it) it.cancel(); return true; });
+  ipcMain.handle('downloads:clear', () => { for (let i = downloads.length - 1; i >= 0; i--) if (downloads[i].state !== 'progressing') downloads.splice(i, 1); writeJson('downloads.json', downloads); return true; });
+}
+
+/* ---------------- Permissões ---------------- */
+const AUTO_ALLOW = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'keyboardLock', 'mediaKeySystem', 'media', 'display-capture']);
+const ASK = new Set(['media', 'geolocation', 'notifications', 'midi', 'midiSysex', 'clipboard-read']);
+let perms = null;
+function describePermission(permission, details) {
+  switch (permission) {
+    case 'media': { const t = (details && details.mediaTypes) || []; return t.includes('video') && t.includes('audio') ? 'usar a câmara e o microfone' : t.includes('video') ? 'usar a câmara' : 'usar o microfone'; }
+    case 'geolocation': return 'saber a tua localização'; case 'notifications': return 'enviar-te notificações'; case 'display-capture': return 'partilhar o teu ecrã'; case 'clipboard-read': return 'ler a área de transferência'; default: return 'usar a permissão "' + permission + '"';
+  }
+}
+async function askPermission(origin, permission, details, k, store, persist) {
+  let host = origin; try { host = new URL(origin).host; } catch (e) {}
+  const r = await dialog.showMessageBox({ type: 'question', buttons: ['Permitir', 'Bloquear'], defaultId: 1, cancelId: 1, title: 'Pedido de permissão', message: `${host} quer ${describePermission(permission, details)}`, checkboxLabel: persist ? 'Lembrar a minha escolha para este site' : 'Lembrar nesta sessão privada', checkboxChecked: persist });
+  const allowed = r.response === 0; if (r.checkboxChecked) { store[k] = allowed; if (persist) writeJson('permissions.json', store); } return allowed;
+}
+function setupPermissions(ses, { persist = true } = {}) {
+  const store = persist ? (perms = perms || readJson('permissions.json', {})) : {};
+  const pendingHere = new Map(); const key = (origin, p) => origin + '|' + p;
+  ses.setPermissionCheckHandler((wc, permission, origin) => AUTO_ALLOW.has(permission) || store[key(origin, permission)] === true);
+  ses.setPermissionRequestHandler(async (wc, permission, callback, details) => {
+    if (AUTO_ALLOW.has(permission)) return callback(true); if (!ASK.has(permission)) return callback(false);
+    let origin = ''; try { origin = new URL(details.requestingUrl || wc.getURL()).origin; } catch (e) {}
+    if (!origin || origin === 'null') return callback(false);
+    const k = key(origin, permission); if (k in store) return callback(store[k]); if (pendingHere.has(k)) return pendingHere.get(k).then(callback);
+    const p = askPermission(origin, permission, details, k, store, persist); pendingHere.set(k, p); let allowed = false;
+    try { allowed = await p; } finally { pendingHere.delete(k); } callback(allowed);
+  });
+}
+function setupPermissionsIpc() {
+  perms = perms || readJson('permissions.json', {});
+  ipcMain.handle('permissions:list', () => Object.keys(perms).map((k) => { const i = k.lastIndexOf('|'); const permission = k.slice(i + 1); const label = permission === 'media' ? 'usar a câmara ou o microfone' : describePermission(permission, {}); return { key: k, origin: k.slice(0, i), permission, label, allowed: perms[k] === true }; }));
+  ipcMain.handle('permissions:remove', (e, k) => { if (k in perms) { delete perms[k]; writeJson('permissions.json', perms); } return true; });
+  ipcMain.handle('permissions:clear', () => { Object.keys(perms).forEach((k) => delete perms[k]); writeJson('permissions.json', perms); return true; });
+}
+
+/* ---------------- Partilha de ecrã ---------------- */
+const THUMB_SIZE = { width: 320, height: 200 };
+function pickerHtml(items) {
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const cards = items.map((it) => `<div class="card" data-i="${it.i}" tabindex="0" role="button" aria-label="${esc(it.name)}">` + (it.thumb ? `<img class="pic" src="${it.thumb}" alt="">` : `<div class="ph">Pré-visualização indisponível</div>`) + `<div class="meta">${it.icon ? `<img class="icon" src="${it.icon}" alt="">` : ''}<span>${esc(it.name)}</span></div><div class="kind">${it.kind === 'screen' ? 'Ecrã inteiro' : 'Janela'}</div></div>`).join('');
+  return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Partilhar o ecrã</title><style>body{margin:0;background:#141517;color:#ececee;font-family:"Segoe UI",system-ui,sans-serif;user-select:none}header{padding:18px 22px 6px}h1{font-size:17px;font-weight:600;margin:0 0 4px}header p{margin:0;font-size:12px;color:#9a9aa2}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:14px 22px 6px}.card{background:#1f2023;border:1px solid #2c2d31;border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s}.card:hover,.card:focus{border-color:#ff5722;outline:none}.card .pic{display:block;width:100%;height:168px;object-fit:cover;background:#0c0d0e}.ph{height:168px;background:#0c0d0e;display:grid;place-items:center;color:#55565b;font-size:12px}.meta{display:flex;align-items:center;gap:8px;padding:8px 12px 0}.meta .icon{width:16px;height:16px;border-radius:3px;flex:none}.meta span{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kind{font-size:11px;color:#8a8b90;padding:2px 12px 10px}footer{display:flex;justify-content:flex-end;padding:10px 22px 18px}button{background:#2c2d31;color:#ececee;border:0;border-radius:8px;padding:9px 18px;font-size:13px;cursor:pointer}button:hover{background:#38393d}</style></head><body><header><h1>Escolher o que partilhar</h1><p>Seleciona um ecrã inteiro ou uma janela — a partilha começa de imediato.</p></header><div id="grid">${cards}</div><footer><button id="cancel">Cancelar</button></footer><script>var done=false,resolver=null;window.__pickPromise=new Promise(function(r){resolver=r;});function finish(v){if(done)return;done=true;resolver(v);}document.querySelectorAll('.card').forEach(function(c){c.addEventListener('click',function(){finish(parseInt(c.dataset.i,10));});c.addEventListener('keydown',function(e){if(e.key==='Enter')finish(parseInt(c.dataset.i,10));});});document.getElementById('cancel').addEventListener('click',function(){finish(null);});document.addEventListener('keydown',function(e){if(e.key==='Escape')finish(null);});setTimeout(function(){finish(null);},120000);</script></body></html>`;
+}
+async function pickDisplaySource() {
+  const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: THUMB_SIZE, fetchWindowIcons: true }); if (!sources.length) return null;
+  const items = sources.map((s, i) => ({ i, name: s.name || (String(s.id).startsWith('screen:') ? 'Ecrã ' + (i + 1) : 'Janela'), kind: String(s.id).startsWith('screen:') ? 'screen' : 'window', thumb: s.thumbnail && !s.thumbnail.isEmpty() ? s.thumbnail.toDataURL() : '', icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : '' }));
+  const mw = ctx && ctx.getMainWindow ? ctx.getMainWindow() : null;
+  const win = new BrowserWindow({ width: 760, height: 540, ...(mw && !mw.isDestroyed() ? { parent: mw, modal: true } : {}), frame: false, resizable: false, minimizable: false, maximizable: false, fullscreenable: false, alwaysOnTop: true, show: false, backgroundColor: '#141517', title: 'Partilhar o ecrã', autoHideMenuBar: true, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  win.once('ready-to-show', () => win.show());
+  try { await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(pickerHtml(items))); const choice = await win.webContents.executeJavaScript('window.__pickPromise', true); return Number.isInteger(choice) && sources[choice] ? sources[choice] : null; } catch (e) { return null; } finally { try { if (!win.isDestroyed()) win.destroy(); } catch (e2) {} }
+}
+function attachDisplayMediaHandler(ses) {
+  try {
+    ses.setDisplayMediaRequestHandler(async (request, callback) => {
+      if (!request || request.videoRequested === false) return callback({}); if (!request.userGesture) return callback({});
+      try { const source = await pickDisplaySource(); if (!source) return callback({}); const out = { video: source }; if (request.audioRequested && process.platform === 'win32') out.audio = 'loopback'; callback(out); } catch (e) { callback({}); }
+    });
+  } catch (e) {}
+}
+
+/* ---------------- Certificados ---------------- */
+const certExceptions = new Set();
+function setupCertificates() {
+  app.on('certificate-error', (event, wc, url, error, certificate, callback) => { event.preventDefault(); let host = ''; try { host = new URL(url).host; } catch (e) {} callback(!!host && certExceptions.has(host)); });
+  ipcMain.handle('security:proceed', (e, url) => { const view = Object.values(views()).find((v) => v.webContents === e.sender); if (!view || !view.failedUrl || view.failedUrl !== url) return false; let u; try { u = new URL(url); } catch (e2) { return false; } if (u.protocol !== 'https:') return false; certExceptions.add(u.host); view.webContents.loadURL(url); return true; });
+}
+
+/* ---------------- Atalhos ---------------- */
+const closed = [];
+function zoom(delta, reset) { const v = active(); if (!v) return; const wc = v.webContents; const z = reset ? 1 : Math.min(3, Math.max(0.25, +(wc.getZoomFactor() + delta).toFixed(2))); wc.setZoomFactor(z); note('Zoom: ' + Math.round(z * 100) + '%'); }
+function cycle(dir) { const ids = Object.keys(views()); if (ids.length < 2) return; const i = ids.indexOf(ctx.getActiveId()); ctx.switchTab(ids[(i + dir + ids.length) % ids.length]); }
+function openInternal(url) { const v = active(); const cur = v ? v.webContents.getURL() : ''; if (v && (cur === '' || cur === 'about:blank')) v.webContents.loadURL(url); else ctx.createNewTab(url); }
+function reopenClosed() { const u = closed.pop(); if (u) ctx.createNewTab(u); }
+
+function attach(wc) {
+  wc.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const ctrl = input.control || input.meta; const key = (input.key || '').toLowerCase();
+    const run = (fn) => { event.preventDefault(); try { fn(); } catch (e) {} };
+    const v = active(); const awc = v && v.webContents;
+
+    if (key === 'escape') { toChrome('find:close'); return; }
+    if (key === 'f12' || (ctrl && input.shift && key === 'i')) return run(() => awc && awc.toggleDevTools());
+    if (key === 'f11') return run(() => { const w = ctx.getMainWindow(); w.setFullScreen(!w.isFullScreen()); });
+    if (key === 'f5') return run(() => awc && awc.reload());
+    if (input.alt && !ctrl && (key === 'arrowleft' || key === 'arrowright')) { return run(() => { if (!awc) return; const h = navOf(awc); if (key === 'arrowleft') { if (h.canGoBack()) h.goBack(); } else if (h.canGoForward()) h.goForward(); }); }
+    if (!ctrl) return;
+
+    if (key === '+' || key === '=') return run(() => zoom(0.1));
+    if (key === '-') return run(() => zoom(-0.1));
+    if (key === '0') return run(() => zoom(0, true));
+
+    if (input.shift) {
+      if (key === 't') return run(reopenClosed);
+      if (key === 'n') return run(() => ctx.createNewTab('about:blank', true));
+      if (key === 'a') return run(() => toChrome('assistant:toggle'));
+      if (key === 'k') return run(() => { toChrome('tabsearch:open'); ctx.getChromeView().webContents.focus(); });
+      if (key === 'b') return run(() => toChrome('bookmarks:toggle-bar'));
+      if (key === 'r') return run(() => awc && awc.reloadIgnoringCache());
+      if (key === 'tab') return run(() => cycle(-1));
+      return;
+    }
+
+    if (key === 't') return run(() => ctx.createNewTab());
+    if (key === 'w') return run(() => ctx.closeTab(ctx.getActiveId()));
+    if (key === 'tab') return run(() => cycle(1));
+    if (key === 'r') return run(() => awc && awc.reload());
+    if (key === 'p') return run(() => awc && awc.print());
+    if (key === 'u') return run(() => awc && ctx.createNewTab('view-source:' + awc.getURL()));
+    if (key === 'h') return run(() => openInternal('kortex://history'));
+    if (key === 'j') return run(() => openInternal('kortex://downloads'));
+    if (key === 'l') return run(() => { toChrome('focus-url'); ctx.getChromeView().webContents.focus(); });
+    if (key === 'f') return run(() => { toChrome('find:open'); ctx.getChromeView().webContents.focus(); });
+    if (key === 'd') return run(() => { if (!awc) return; const r = toggleBookmark(awc.getURL(), awc.getTitle()); note(r.ok ? (r.bookmarked ? 'Marcador adicionado' : 'Marcador removido') : 'Esta página não pode ser guardada'); });
+    if (/^[1-9]$/.test(key)) return run(() => { const ids = Object.keys(views()); const id = key === '9' ? ids[ids.length - 1] : ids[Number(key) - 1]; if (id) ctx.switchTab(id); });
+  });
+}
+
+/* ---------------- Pesquisa ---------------- */
+function setupFind() {
+  ipcMain.on('find:start', (e, { text, forward = true, next = false } = {}) => { const v = active(); if (!v || !text) return; v.webContents.findInPage(String(text), { forward, findNext: next }); });
+  ipcMain.on('find:stop', () => { const v = active(); if (v && !v.webContents.isDestroyed()) v.webContents.stopFindInPage('clearSelection'); });
+}
+
+/* ---------------- Menu de contexto ---------------- */
+function setupTabMenu() {
+  ipcMain.on('tabs:context', (e, id) => {
+    const v = views()[id]; if (!v) return; const wc = v.webContents;
+    const others = () => Object.keys(views()).filter((x) => x !== id && !views()[x].pinned);
+    const menu = Menu.buildFromTemplate([
+      { label: 'Novo separador', click: () => ctx.createNewTab() },
+      { label: 'Reabrir separador fechado', enabled: closed.length > 0, click: reopenClosed },
+      { type: 'separator' },
+      { label: 'Recarregar', click: () => wc.reload() },
+      { label: 'Duplicar', click: () => ctx.createNewTab(wc.getURL(), !!v.isPrivate) },
+      { label: v.pinned ? 'Desafixar' : 'Fixar', click: () => { v.pinned = !v.pinned; ctx.sendTabsToUI(); } },
+      { label: wc.isAudioMuted() ? 'Reativar som' : 'Silenciar separador', click: () => { wc.setAudioMuted(!wc.isAudioMuted()); ctx.sendTabsToUI(); } },
+      { type: 'separator' },
+      { label: 'Fechar', click: () => ctx.closeTab(id) },
+      { label: 'Fechar outros', click: () => others().forEach((x) => ctx.closeTab(x)) },
+      { label: 'Fechar à direita', click: () => { const ids = Object.keys(views()); ids.slice(ids.indexOf(id) + 1).filter((x) => !views()[x].pinned).forEach((x) => ctx.closeTab(x)); } }
+    ]);
+    menu.popup();
+  });
+}
+
+/* ---------------- Página de erro ---------------- */
+function errorPage(url, desc) {
+  const esc = (s) => String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const js = JSON.stringify(url).replace(/</g, '\\u003c');
+  return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Não foi possível aceder ao site</title><style>body{margin:0;height:100vh;display:grid;place-items:center;background:#1a1b1d;color:#ececee;font-family:"Segoe UI",system-ui,sans-serif}.b{max-width:480px;padding:24px}h1{font-size:22px;font-weight:600;margin-bottom:10px}p{color:#9a9aa2;line-height:1.5;margin-bottom:6px}code{color:#ff5722}button{margin-top:18px;padding:10px 22px;border:0;border-radius:8px;background:#ff5722;color:#fff;font-size:14px;font-weight:600;cursor:pointer}</style></head><body><div class="b"><h1>Não foi possível aceder ao site</h1><p><code>${esc(url)}</code></p><p>${esc(desc)}</p><p>Verifica a ligação à internet e o endereço.</p><button onclick="location.href=${js}">Tentar de novo</button></div></body></html>`;
+}
+
+const DARK_CSS = 'html{background:#fff!important;filter:invert(1) hue-rotate(180deg)!important}' + 'img,picture,video,canvas,iframe,[style*="background-image"]{filter:invert(1) hue-rotate(180deg)!important}';
+async function applyDark(view) {
+  const wc = view.webContents; if (wc.isDestroyed()) return;
+  if (view.darkKey) { try { await wc.removeInsertedCSS(view.darkKey); } catch (e) {} view.darkKey = null; }
+  const want = false; if (want) { try { view.darkKey = await wc.insertCSS(DARK_CSS); } catch (e) {} }
+}
+
+function showPageMenu(view, p) {
+  const wc = view.webContents; const nav = navOf(wc); const sel = (p.selectionText || '').trim(); const t = []; const sep = () => { if (t.length && t[t.length - 1].type !== 'separator') t.push({ type: 'separator' }); };
+  if (p.isEditable) { const f = p.editFlags || {}; t.push({ label: 'Anular', enabled: !!f.canUndo, click: () => wc.undo() }, { label: 'Refazer', enabled: !!f.canRedo, click: () => wc.redo() }, { type: 'separator' }, { label: 'Cortar', enabled: !!f.canCut, click: () => wc.cut() }, { label: 'Copiar', enabled: !!f.canCopy, click: () => wc.copy() }, { label: 'Colar', enabled: !!f.canPaste, click: () => wc.paste() }, { label: 'Selecionar tudo', click: () => wc.selectAll() }); }
+  if (sel && !p.isEditable) { const short = sel.length > 28 ? sel.slice(0, 28) + '…' : sel; t.push({ label: 'Copiar', click: () => wc.copy() }); t.push({ label: `Pesquisar «${short}»`, click: () => ctx.createNewTab(ctx.settings.searchUrl(sel)) }); }
+  if (sel) t.push({ label: 'Perguntar ao Kortex', click: () => ctx.askAI('Explica isto:\n\n' + sel) });
+  if (p.linkURL) { sep(); t.push({ label: 'Abrir ligação num novo separador', click: () => ctx.createNewTab(p.linkURL) }, { label: 'Copiar endereço da ligação', click: () => clipboard.writeText(p.linkURL) }); }
+  if (p.mediaType === 'image' && p.srcURL) { sep(); t.push({ label: 'Abrir imagem num novo separador', click: () => ctx.createNewTab(p.srcURL) }, { label: 'Guardar imagem como…', click: () => wc.downloadURL(p.srcURL) }, { label: 'Copiar imagem', click: () => wc.copyImageAt(p.x, p.y) }, { label: 'Copiar endereço da imagem', click: () => clipboard.writeText(p.srcURL) }); }
+  if (!p.isEditable && !sel && !p.linkURL && p.mediaType !== 'image') { t.push({ label: 'Recuar', enabled: nav.canGoBack(), click: () => nav.goBack() }, { label: 'Avançar', enabled: nav.canGoForward(), click: () => nav.goForward() }, { label: 'Recarregar', click: () => wc.reload() }, { type: 'separator' }, { label: 'Resumir esta página', click: () => ctx.askAI('Resume esta página em pontos principais.') }, { label: 'Perguntar ao Kortex sobre esta página', click: () => ctx.askAI('') }, { type: 'separator' }, { label: 'Guardar página como…', click: () => wc.downloadURL(wc.getURL()) }, { label: 'Imprimir…', click: () => wc.print() }, { label: 'Traduzir esta página', click: () => ctx.createNewTab('https://translate.google.com/translate?sl=auto&tl=pt&u=' + encodeURIComponent(wc.getURL())) }, { label: 'Ver código-fonte', click: () => ctx.createNewTab('view-source:' + wc.getURL()) }); }
+  sep(); t.push({ label: 'Inspecionar', click: () => wc.inspectElement(p.x, p.y) });
+  const menu = Menu.buildFromTemplate(t);
+  try { menu.popup({ window: ctx.getMainWindow() }); } catch (e) { menu.popup(); }
+}
+
+/* ---------------- Ligações por separador ---------------- */
+function attachView(id, view) {
+  const wc = view.webContents;
+  attach(wc);
+
+  wc.on('page-favicon-updated', (e, favs) => { view.favicon = (favs && favs[0]) || ''; refresh(); });
+  wc.on('did-start-loading', () => { view.loading = true; refresh(); });
+  wc.on('did-stop-loading', () => { view.loading = false; refresh(); });
+  wc.on('audio-state-changed', refresh);
+  
+  // AQUI ESTÁ A INJEÇÃO DO CLAUDE
+  wc.on('dom-ready', () => {
+    applyDark(view);
+    applyContrastFix(wc);
+  });
+
+  wc.on('context-menu', (e, params) => showPageMenu(view, params));
+  wc.on('did-navigate', (e, url) => { view.lastUrl = url; view.favicon = ''; if (!/^(data:|kortex:\/\/certerror)/i.test(String(url))) view.failedUrl = ''; refresh(); });
+  wc.on('did-navigate-in-page', (e, url, isMain) => { if (isMain) { view.lastUrl = url; refresh(); } });
+  wc.on('found-in-page', (e, r) => { if (view === active()) toChrome('find:result', { active: r.activeMatchOrdinal, total: r.matches }); });
+  wc.on('did-fail-load', (e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || code === 0) return;
+    if (/^(kortex|view-source|data):/i.test(url)) return;
+    view.failedUrl = url;
+    if (/^ERR_CERT_/.test(desc || '')) wc.loadURL('kortex://certerror/?' + new URLSearchParams({ url, desc }).toString());
+    else wc.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(errorPage(url, desc)));
+  });
+}
+
+function onClose(view) {
+  const u = view && view.lastUrl;
+  if (view && !view.isPrivate && /^(https?|kortex):/i.test(u || '')) { closed.push(u); if (closed.length > 20) closed.shift(); }
+}
+
+function tabInfo(id, base) {
+  const v = views()[id]; if (!v) return base;
+  let url = base.url;
+  const onErrorPage = /^(data:text\/html|kortex:\/\/certerror)/i.test(String(url));
+  if (onErrorPage && v.failedUrl) url = v.failedUrl;
+  return { ...base, url, certError: onErrorPage && /^kortex:\/\/certerror/i.test(String(base.url)), favicon: v.favicon || '', loading: !!v.loading, pinned: !!v.pinned, audible: v.webContents.isCurrentlyAudible(), muted: v.webContents.isAudioMuted() };
+}
+
+function init(c) {
+  ctx = c;
+  setupBookmarks(); setupHistory(); setupDownloads(); setupFind(); setupTabMenu();
+  setupPermissions(session.defaultSession);
+  attachDisplayMediaHandler(session.defaultSession);
+  setupPermissionsIpc(); setupCertificates();
+  if (ctx.settings) ctx.settings.onChanged((key) => { if (key === 'appearance.forceDark') Object.values(views()).forEach(applyDark); });
+}
+
+const setupSession = (ses) => { setupPermissions(ses, { persist: false }); attachDisplayMediaHandler(ses); };
+
+module.exports = { init, attach, attachView, onClose, tabInfo, setupSession, askAI: (t) => toChrome('assistant:ask', { text: t }), openInternal };
+
+--- FIM DO FICHEIRO: src\main\browser-features.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\settings.js ---
+=============================================================
+// src/main/settings.js — registo central das definições do Kortex.
+// Todas as chaves vivem em SCHEMA. defineSchema() recusa chaves repetidas, por isso
+// uma duplicação (como a que existia antes) rebenta logo no arranque em vez de passar despercebida.
+const path = require('path');
+const fs = require('fs');
+const { app, nativeTheme, shell, dialog } = require('electron');
+const secrets = require('./secrets');
+
+const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
+
+const ENGINES = {
+  google:     'https://www.google.com/search?q=%s',
+  duckduckgo: 'https://duckduckgo.com/?q=%s',
+  bing:       'https://www.bing.com/search?q=%s',
+  brave:      'https://search.brave.com/search?q=%s',
+  ecosia:     'https://www.ecosia.org/search?q=%s',
+  perplexity: 'https://www.perplexity.ai/search?q=%s',
+};
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+const MODEL_ID = /^[\w.\-/:]+$/;
+
+function defineSchema(entries) {
+  const schema = {};
+  for (const [key, def] of entries) {
+    if (key in schema) throw new Error(`[Kortex Settings] chave duplicada no SCHEMA: ${key}`);
+    schema[key] = def;
+  }
+  return schema;
+}
+
+const SCHEMA = defineSchema([
+  // --- Aspeto ---
+  ['appearance.theme',            { type: 'enum', values: ['dark', 'light', 'system'], default: 'dark', apply: (v) => { nativeTheme.themeSource = v; } }],
+  ['appearance.accent',           { type: 'string', default: '#ff5722', validate: (v) => HEX_COLOR.test(v) }],
+  ['appearance.font',             { type: 'enum', values: ['segoe', 'inter', 'system', 'mono'], default: 'segoe' }],
+  ['appearance.forceDark',        { type: 'bool', default: false }],
+  ['appearance.compact',          { type: 'bool', default: false }],
+  ['appearance.bookmarksBar',     { type: 'bool', default: false }],
+  ['appearance.showAssistantBtn', { type: 'bool', default: true }],
+  ['appearance.sidebarCollapsed', { type: 'bool', default: false }],
+  ['appearance.reduceMotion',     { type: 'bool', default: false }],
+  ['appearance.showGreeting',     { type: 'bool', default: true }],
+  ['appearance.homeBackground',   { type: 'enum', values: ['plain', 'glow'], default: 'plain' }],
+  ['appearance.chatFontSize',     { type: 'enum', values: ['13', '14', '16'], default: '14' }],
+  ['appearance.zoom',             { type: 'enum', values: ['0.8', '0.9', '1', '1.1', '1.25', '1.5'], default: '1' }],
+
+  // --- Pesquisa ---
+  ['search.engine', { type: 'enum', values: Object.keys(ENGINES), default: 'perplexity' }],
+
+  // --- Privacidade ---
+  ['privacy.suggestions',         { type: 'bool', default: true }],
+  ['privacy.blockAds',            { type: 'bool', default: true, reloadTabs: true }],
+  ['privacy.blockThirdPartyCookies', { type: 'bool', default: true, reloadTabs: true }],
+  ['privacy.cookieExceptions',    { type: 'array', default: [], validate: (a) => a.every((x) => typeof x === 'string' && x.length > 0 && x.length < 256) }],
+  ['privacy.dnt',                 { type: 'bool', default: false }],
+  ['privacy.gpc',                 { type: 'bool', default: true }],
+  ['privacy.clearOnExit',         { type: 'bool', default: false }],
+
+  // --- Transferências ---
+  ['downloads.askEach',           { type: 'bool', default: false }],
+  ['downloads.showWhenDone',      { type: 'bool', default: false }],
+  ['downloads.folder',            { type: 'string', default: '', validate: (v) => v === '' || (path.isAbsolute(v) && fs.existsSync(v)) }],
+  ['downloads.chooseFolder',      { type: 'action', apply: async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+    if (!r.canceled && r.filePaths[0]) await set('downloads.folder', r.filePaths[0]);
+  } }],
+
+  // --- Arranque ---
+  ['startup.mode',                { type: 'enum', values: ['newtab', 'continue'], default: 'newtab' }],
+  ['startup.openAtLogin',         { type: 'bool', default: false, apply: (v) => { if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: v }); } }],
+
+  // --- Assistente IA ---
+  ['assistant.enabled',           { type: 'bool', default: true }],
+  ['assistant.pageAccess',        { type: 'bool', default: true }],
+  // A chave NUNCA tem valor por omissão no código. Define-se em Definições → Assistente IA
+  // (ou na variável de ambiente OPENROUTER_API_KEY, que o ai.js usa como alternativa).
+  ['ai.apiKey',                   { type: 'string', default: '' }],
+  ['ai.model',                    { type: 'string', default: 'google/gemini-2.0-flash-001', validate: (v) => MODEL_ID.test(v) }],
+  ['ai.webSearch',                { type: 'bool', default: false }],
+
+  // --- Plugins / sistema ---
+  ['plugins',                     { type: 'object', default: {}, noReset: true, validate: (o) => Object.values(o).every((x) => typeof x === 'boolean') }],
+  ['privacy.managePermissions',   { type: 'action', apply: () => app.emit('kortex:open-internal', 'kortex://permissions') }],
+  ['system.openDataFolder',       { type: 'action', apply: () => shell.openPath(app.getPath('userData')) }],
+]);
+
+// Chaves cujo valor nunca vai em texto simples para o settings.json.
+const SECRET_KEYS = ['ai.apiKey'];
+
+let store = {};
+let needsMigration = false;
+const listeners = [];
+const clone = (x) => JSON.parse(JSON.stringify(x === undefined ? null : x));
+
+function isValid(def, v) {
+  switch (def.type) {
+    case 'bool':   return typeof v === 'boolean';
+    case 'enum':   return def.values.includes(v);
+    case 'string': return typeof v === 'string' && (!def.validate || def.validate(v));
+    case 'array':  return Array.isArray(v) && (!def.validate || def.validate(v));
+    case 'object': return !!v && typeof v === 'object' && !Array.isArray(v) && (!def.validate || def.validate(v));
+    default:       return false;
+  }
+}
+
+function load() {
+  try {
+    if (fs.existsSync(SETTINGS_PATH)) store = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')) || {};
+  } catch (e) {
+    console.warn('[Kortex Settings] settings.json ilegível, a usar predefinições:', e.message);
+    store = {};
+  }
+  for (const key in SCHEMA) {
+    const def = SCHEMA[key];
+    if (def.type === 'action') { delete store[key]; continue; }
+    if (SECRET_KEYS.includes(key)) {
+      const { value, wasPlain } = secrets.decrypt(store[key]);
+      store[key] = value;
+      if (wasPlain && value && secrets.available()) needsMigration = true; // havia um valor em texto simples: regravar cifrado
+      continue;
+    }
+    if (!(key in store) || !isValid(def, store[key])) store[key] = clone(def.default);
+  }
+  for (const key of SECRET_KEYS) if (typeof store[key] !== 'string') store[key] = '';
+}
+
+function save() {
+  const out = { ...store };
+  for (const key of SECRET_KEYS) {
+    const enc = secrets.encrypt(store[key]);
+    out[key] = enc === null ? '' : enc; // sem cifra disponível, é preferível não guardar a chave a guardá-la em claro
+  }
+  const tmp = SETTINGS_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(out, null, 2));
+  fs.renameSync(tmp, SETTINGS_PATH);
+}
+
+function init() {
+  load();
+  if (needsMigration) { try { save(); console.log('[Kortex Settings] chave da API migrada para armazenamento cifrado'); } catch (e) { console.warn('[Kortex Settings] migração falhou:', e.message); } }
+  for (const key in SCHEMA) {
+    const def = SCHEMA[key];
+    if (def.apply && def.type !== 'action') {
+      try { def.apply(store[key]); } catch (e) { console.warn(`[Kortex Settings] apply(${key}):`, e.message); }
+    }
+  }
+}
+
+const get = (key) => store[key];
+
+function getAll() {
+  const out = {};
+  for (const key in SCHEMA) if (SCHEMA[key].type !== 'action') out[key] = store[key];
+  out['about.version'] = app.getVersion();
+  return out;
+}
+
+async function set(key, value) {
+  const def = SCHEMA[key];
+  if (!def) throw new Error(`Definição desconhecida: ${key}`);
+  if (def.type === 'action') { await def.apply?.(); return { success: true }; }
+  if (!isValid(def, value)) throw new Error(`Valor inválido para ${key}`);
+  if (JSON.stringify(store[key]) === JSON.stringify(value)) return { success: true, changed: false };
+
+  store[key] = value;
+  save();
+  try { def.apply?.(value); } catch (e) { console.warn(`[Kortex Settings] apply(${key}):`, e.message); }
+  for (const cb of listeners) { try { cb(key, value); } catch (e) { /* um listener com erro não bloqueia os outros */ } }
+  return { success: true, changed: true, restart: !!def.restart, reloadTabs: !!def.reloadTabs };
+}
+
+async function reset(prefix = '') {
+  let changed = 0;
+  for (const key in SCHEMA) {
+    const def = SCHEMA[key];
+    if (def.type === 'action' || def.noReset || !key.startsWith(prefix)) continue;
+    const r = await set(key, clone(def.default));
+    if (r.changed) changed++;
+  }
+  return { success: true, changed };
+}
+
+const onChanged = (cb) => { listeners.push(cb); };
+
+function searchUrl(query) {
+  const tpl = ENGINES[store['search.engine']] || ENGINES.google;
+  return tpl.replace('%s', () => encodeURIComponent(query));
+}
+
+function resolveInput(text) {
+  const t = String(text || '').trim();
+  if (!t) return 'about:blank';
+  if (/^(https?|file|ftp):\/\//i.test(t) || /^(about|kortex|view-source):/i.test(t)) return t;
+  if (/^localhost(:\d+)?([/?#]|$)/i.test(t) || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?([/?#]|$)/.test(t)) return 'http://' + t;
+  if (!/\s/.test(t) && /^[^\s/?#]+\.[a-z]{2,}(:\d+)?([/?#]\S*)?$/i.test(t)) return 'https://' + t;
+  return searchUrl(t);
+}
+
+module.exports = { init, get, getAll, set, reset, onChanged, searchUrl, resolveInput, SCHEMA, ENGINES };
+
+
+--- FIM DO FICHEIRO: src\main\settings.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\features.js ---
+=============================================================
+const path = require('path');
+const fs = require('fs');
+const { app, session, shell, webContents } = require('electron');
+const { getDomain } = require('tldts');
+const settings = require('./settings');
+const googleCompat = require('./google-compat');
+
+const hostOf = u => { try { return new URL(u).hostname.toLowerCase(); } catch { return ''; } };
+function isCookieException(host) {
+  const list = settings.get('privacy.cookieExceptions') || [];
+  return list.some(raw => {
+    const e = String(raw).trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^\[\*\.\]/, '').replace(/\/.*$/, '');
+    return e && (host === e || host.endsWith('.' + e));
+  });
+}
+function isThirdParty(details) {
+  if (details.resourceType === 'mainFrame') return false;
+  const wc = details.webContentsId ? webContents.fromId(details.webContentsId) : null;
+  if (!wc || wc.isDestroyed()) return false;
+  const pageHost = hostOf(wc.getURL());
+  const reqHost = hostOf(details.url);
+  if (!pageHost || !reqHost || isCookieException(pageHost)) return false;
+  return getDomain(reqHost) !== getDomain(pageHost);
+}
+const deleteHeader = (headers, name) => { for (const k of Object.keys(headers)) if (k.toLowerCase() === name) delete headers[k]; };
+
+function setupWebRequest() {
+  const ses = session.defaultSession;
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const headers = details.requestHeaders;
+    if (settings.get('privacy.dnt')) headers['DNT'] = '1';
+    if (settings.get('privacy.gpc')) headers['Sec-GPC'] = '1';
+    if (settings.get('privacy.blockThirdPartyCookies') && isThirdParty(details)) deleteHeader(headers, 'cookie');
+    callback({ requestHeaders: headers });
+  });
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    const headers = details.responseHeaders;
+    if (settings.get('privacy.blockThirdPartyCookies') && isThirdParty(details)) deleteHeader(headers, 'set-cookie');
+    callback({ responseHeaders: headers });
+  });
+}
+
+function uniquePath(dir, name) {
+  const safe = path.basename(name);
+  const ext = path.extname(safe);
+  const base = path.basename(safe, ext);
+  let p = path.join(dir, safe);
+  let n = 1;
+  while (fs.existsSync(p)) p = path.join(dir, `${base} (${n++})${ext}`);
+  return p;
+}
+
+function setupDownloads() {
+  session.defaultSession.on('will-download', (event, item) => {
+    if (!settings.get('downloads.askEach')) {
+      let dir = settings.get('downloads.folder');
+      if (!dir || !fs.existsSync(dir)) dir = app.getPath('downloads');
+      item.setSavePath(uniquePath(dir, item.getFilename()));
+    }
+    if (settings.get('downloads.showWhenDone')) {
+      item.once('done', (_e, state) => { if (state === 'completed') shell.showItemInFolder(item.getSavePath()); });
+    }
+  });
+}
+
+function applyZoom(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  const z = parseFloat(settings.get('appearance.zoom'));
+  wc.setZoomFactor(Number.isFinite(z) ? z : 1);
+}
+
+const SESSION_FILE = path.join(app.getPath('userData'), 'session-tabs.json');
+const isWebUrl = u => typeof u === 'string' && /^https?:\/\//i.test(u);
+function saveSessionTabs(getViews) {
+  try {
+    const urls = Object.values(getViews()).filter(v => !v.isPrivate && !v.webContents.isDestroyed()).map(v => v.webContents.getURL()).filter(isWebUrl);
+    fs.writeFileSync(SESSION_FILE, JSON.stringify(urls));
+  } catch (e) {}
+}
+function readSessionTabs() {
+  try { const arr = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); return Array.isArray(arr) ? arr.filter(isWebUrl).slice(0, 30) : []; } catch { return []; }
+}
+
+function setupClearOnExit() {
+  let done = false;
+  app.on('before-quit', (e) => {
+    if (done || !settings.get('privacy.clearOnExit')) return;
+    e.preventDefault(); done = true;
+    Promise.allSettled([ session.defaultSession.clearStorageData({ storages: ['cookies'] }), session.defaultSession.clearCache() ]).finally(() => app.quit());
+  });
+}
+
+function init({ getViews }) {
+  setupWebRequest(); setupDownloads(); setupClearOnExit();
+  settings.onChanged((key) => { if (key === 'appearance.zoom') Object.values(getViews()).forEach(v => applyZoom(v.webContents)); });
+}
+module.exports = { init, applyZoom, saveSessionTabs, readSessionTabs, isThirdParty, isCookieException };
+
+--- FIM DO FICHEIRO: src\main\features.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\ai.js ---
+=============================================================
+// src/main/ai.js — Assistente IA do Kortex (substitui o ipcMain.handle('chat') antigo)
+const { ipcMain } = require('electron');
+
+const BASE_PROMPT = [
+  'Tu és o Kortex, o assistente integrado no navegador Kortex.',
+  'Responde sempre no idioma do utilizador, de forma clara e direta.',
+  'Usa Markdown simples (listas, **negrito**, blocos de código).',
+  'Quando receberes o conteúdo da página aberta, usa-o para responder.',
+  'Se NÃO receberes conteúdo de página, diz que não consegues ler a página atual (não inventes).'
+].join(' ');
+
+function init({ settings, getActiveView, getAllViews, getSkillsPrompt }) {
+  const controllers = new Map();
+
+  async function readPage(view, max) {
+    if (!view || view.isPrivate || view.webContents.isDestroyed()) return null;
+    const url = view.webContents.getURL();
+    if (!/^https?:/i.test(url)) return null;
+    try {
+      const code = `JSON.stringify({t:document.title,s:String(getSelection()).slice(0,4000),x:((document.body&&document.body.innerText)||'').slice(0,${max})})`;
+      const raw = await Promise.race([
+        view.webContents.executeJavaScript(code),
+        new Promise((r) => setTimeout(() => r(null), 3000))
+      ]);
+      return raw ? { url, ...JSON.parse(raw) } : null;
+    } catch { return null; }
+  }
+
+  async function buildContext({ withPage, withTabs }) {
+    if (settings.get('assistant.pageAccess') === false) return '';
+    if (withTabs) {
+      const views = Object.values(getAllViews()).slice(0, 8);
+      const pages = (await Promise.all(views.map((v) => readPage(v, 3000)))).filter(Boolean);
+      if (!pages.length) return '';
+      return '\n\n[SEPARADORES ABERTOS]\n' + pages.map((p, i) => `(${i + 1}) ${p.t}\n${p.url}\n"""${p.x}"""`).join('\n\n');
+    }
+    if (withPage) {
+      const p = await readPage(getActiveView(), 14000);
+      if (!p) return '';
+      return `\n\n[PÁGINA ABERTA]\nTítulo: ${p.t}\nURL: ${p.url}\n` +
+        (p.s ? `Texto selecionado pelo utilizador:\n"""${p.s}"""\n` : '') +
+        `Conteúdo:\n"""${p.x}"""`;
+    }
+    return '';
+  }
+
+  ipcMain.on('ai:stop', (e, chatId) => { const c = controllers.get(chatId); if (c) c.abort('user'); });
+
+  ipcMain.handle('chat', async (event, { chatId, messages, withPage, withTabs, web }) => {
+    const send = (ch, data) => { if (!event.sender.isDestroyed()) event.sender.send(ch, { chatId, ...data }); };
+    const finish = () => send('ai-done', {});
+
+    if (settings.get('assistant.enabled') === false) {
+      send('ai-error', { error: 'O assistente está desativado nas definições.' });
+      return finish();
+    }
+    const apiKey = settings.get('ai.apiKey') || process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      send('ai-error', { error: 'Falta a chave da API. Abre Definições → Assistente IA e cola a tua chave do OpenRouter (openrouter.ai/keys).' });
+      return finish();
+    }
+
+    const controller = new AbortController();
+    controllers.set(chatId, controller);
+    let timer = setTimeout(() => controller.abort('timeout'), 30000);
+
+    try {
+      let system = BASE_PROMPT;
+      try { const skills = await getSkillsPrompt(); if (skills) system += '\n\n' + skills; } catch {}
+      system += await buildContext({ withPage, withTabs });
+
+      let model = settings.get('ai.model') || 'google/gemini-2.0-flash-001';
+      if ((settings.get('ai.webSearch') || web) && !model.endsWith(':online')) model += ':online';
+
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/d66807617-sketch/kortex',
+          'X-Title': 'Kortex'
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: [{ role: 'system', content: system }, ...(messages || []).slice(-20)]
+        })
+      });
+
+      if (!res.ok) {
+        let msg = `Erro ${res.status}`;
+        try { const j = await res.json(); msg += ': ' + (j.error?.message || JSON.stringify(j)); } catch {}
+        if (res.status === 401) msg += ' — chave inválida ou revogada. Gera uma nova em openrouter.ai/keys.';
+        if (res.status === 402) msg += ' — sem créditos no OpenRouter.';
+        if (res.status === 404) msg += ' — modelo não existe. Confirma o ID em Definições → Assistente IA.';
+        throw new Error(msg);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let first = true;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (first) { clearTimeout(timer); first = false; }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          const data = t.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          let json;
+          try { json = JSON.parse(data); } catch { continue; }
+          if (json.error) throw new Error(json.error.message || 'Erro do fornecedor de IA');
+          const ann = json.choices?.[0]?.delta?.annotations || json.choices?.[0]?.message?.annotations;
+          if (Array.isArray(ann)) {
+            const sources = ann
+              .filter((a) => a && a.type === 'url_citation' && a.url_citation && a.url_citation.url)
+              .map((a) => ({ url: a.url_citation.url, title: a.url_citation.title || '', content: String(a.url_citation.content || '').slice(0, 300) }));
+            if (sources.length) send('ai-sources', { sources });
+          }
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) send('ai-chunk', { delta });
+        }
+      }
+    } catch (err) {
+      const reason = controller.signal.aborted ? controller.signal.reason : null;
+      if (reason === 'user') {
+        // parado pelo utilizador: mantém o texto parcial
+      } else if (reason === 'timeout') {
+        send('ai-error', { error: 'A IA não respondeu em 30 segundos. Tenta de novo ou escolhe outro modelo nas definições.' });
+      } else {
+        let m = err && err.message ? err.message : String(err);
+        if (m === 'fetch failed') m = 'Sem ligação ao OpenRouter. Verifica a internet.';
+        send('ai-error', { error: m });
+      }
+    } finally {
+      clearTimeout(timer);
+      controllers.delete(chatId);
+      finish();
+    }
+  });
+}
+
+module.exports = { init };
+
+
+--- FIM DO FICHEIRO: src\main\ai.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\ext-compat.js ---
+=============================================================
+const fs = require('fs');
+const path = require('path');
+
+const SUPORTADAS = new Set(['action', 'cookies', 'contextMenus', 'runtime', 'scripting', 'storage', 'tabs', 'webRequest', 'devtools', 'extension', 'management', 'i18n', 'webRequestBlocking']);
+const PARCIAIS = { notifications: 'funciona, mas sem botões nas notificações', commands: 'os atalhos de teclado da extensão não são registados', webNavigation: 'faltam alguns eventos', downloads: 'a extensão não consegue gerir as transferências do Kortex', bookmarks: 'a extensão não consegue ler/editar os marcadores do Kortex', history: 'a extensão não consegue ler o histórico do Kortex', idle: 'o estado de atividade pode não ser reportado', alarms: 'os agendamentos periódicos podem não disparar', sessions: 'a lista de separadores recentes não está disponível', topSites: 'a lista de sites mais visitados não está disponível', pageAction: 'suporte limitado', browserAction: 'alias antigo do botão da barra', omnibox: 'pesquisa pela barra de endereço indisponível', search: 'pesquisa em separadores indisponível', pageCapture: 'captura de página em MHTML indisponível', contentSettings: 'controlo de permissões por site indisponível', declarativeContent: 'regras declarativas antigas (MV2) indisponíveis', favicon: 'acesso a favicons indisponível', readingList: 'lista de leitura do Chrome indisponível', fontSettings: 'tipos de letra do navegador indisponíveis', power: 'gestão de energia/ecrã indisponível', system: 'só o chrome.system.storage existe no Electron' };
+const AUSENTES = { identity: 'login "Com a sua Conta Google" da própria extensão não funciona', offscreen: 'documentos offscreen não funcionam', sidePanel: 'o painel lateral da extensão não funciona', proxy: 'a configuração de proxy definida pela extensão não funciona', privacy: 'o controlo de definições de privacidade não funciona', declarativeNetRequest: 'a filtragem declarativa de pedidos (adblockers MV3) não funciona', gcm: 'as notificações push do Google não funcionam', instanceID: 'o registo push do Google não funciona', nativeMessaging: 'a comunicação com programas nativos do Windows não funciona', enterprise: 'as políticas empresariais não funcionam', bluetooth: 'o acesso a Bluetooth não funciona', serial: 'o acesso a portas série não funciona', usb: 'o acesso a dispositivos USB não funciona', hid: 'o acesso a dispositivos HID não funciona', fileSystem: 'o acesso a ficheiros locais (ChromeOS) não funciona', fileBrowserHandler: 'a integração com o explorador de ficheiros não funciona', fileSystemProvider: 'sistemas de ficheiros virtuais não funcionam', printerProvider: 'a integração com impressoras não funciona', printing: 'a impressão via extensão não funciona', printingMetrics: 'as métricas de impressão não funcionam', platformKeys: 'os certificados de cliente não funcionam', vpnProvider: 'extensões VPN não funcionam', input: 'o chrome.input.ime não funciona', tts: 'a síntese de voz via extensão não funciona', ttsEngine: 'motores de voz personalizados não funcionam', mediaGalleries: 'o acesso à biblioteca de média não funciona', syncFileSystem: 'a sincronização de ficheiros não funciona', documentScan: 'a digitalização de documentos não funciona', displaySource: 'a emissão de ecrã (casting) não funciona', dns: 'a resolução DNS manual não funciona', tabCapture: 'a captura de separadores pela extensão não funciona', desktopCapture: 'a partilha de ecrã via API da extensão não funciona', wallpaper: 'a alteração de fundo não funciona', webAuthenticationProxy: 'o proxy de autenticação web não funciona', accessibilityFeatures: 'o controlo de acessibilidade não funciona', signedInDevices: 'a lista de dispositivos iniciados não funciona', app: 'as APIs de aplicações ChromeOS não funcionam' };
+const IGNORADAS = new Set(['activeTab', 'unlimitedStorage', 'clipboardRead', 'clipboardWrite', 'geolocation', 'videoCapture', 'audioCapture', 'experimental', 'background', 'certificateProvider', 'processes']);
+const MSG_AVISO = 'Esta extensão pode não funcionar totalmente no Kortex';
+const MAX_FICHEIROS = 400;
+const MAX_FICHEIRO = 2 * 1024 * 1024;
+const MAX_TOTAL = 16 * 1024 * 1024;
+const PROFUNDIDADE_MAX = 6;
+const PASTAS_SALTADAS = new Set(['_locales', 'node_modules', '.git', '__pycache__']);
+const RE_API = /\b(?:chrome|browser)\s*\.\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:\.|\[)/g;
+
+function scanCodigo(dir) {
+  const apis = new Set();
+  let ficheiros = 0, total = 0;
+  const walk = (d, profundidade) => {
+    if (profundidade > PROFUNDIDADE_MAX || ficheiros >= MAX_FICHEIROS || total >= MAX_TOTAL) return;
+    let items; try { items = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const it of items) {
+      if (ficheiros >= MAX_FICHEIROS || total >= MAX_TOTAL) return;
+      const p = path.join(d, it.name);
+      if (it.isDirectory()) { if (!PASTAS_SALTADAS.has(it.name)) walk(p, profundidade + 1); continue; }
+      if (!/\.(js|mjs|cjs|html)$/i.test(it.name) || /\.map$/i.test(it.name)) continue;
+      let st; try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.size > MAX_FICHEIRO) continue;
+      ficheiros++; total += st.size;
+      let code; try { code = fs.readFileSync(p, 'utf8'); } catch (e) { continue; }
+      for (const m of code.matchAll(RE_API)) apis.add(m[1]);
+    }
+  };
+  walk(dir, 0);
+  return [...apis];
+}
+const primeiroNivel = (ns) => String(ns || '').split('.')[0].trim();
+function classificar(ns, origem) {
+  const base = primeiroNivel(ns);
+  if (IGNORADAS.has(base)) return null;
+  if (SUPORTADAS.has(base)) return null;
+  if (AUSENTES[base]) return { ns: base, estado: 'ausente', nota: AUSENTES[base], origem };
+  if (PARCIAIS[base]) return { ns: base, estado: 'parcial', nota: PARCIAIS[base], origem };
+  return { ns: base, estado: 'parcial', nota: 'API desconhecida pelo Electron (' + base + ' — pode não existir)', origem };
+}
+function fundir(encontradas) {
+  const porNs = new Map();
+  for (const { ns, origem } of encontradas) {
+    const c = classificar(ns, [origem]);
+    if (!c) continue;
+    const anterior = porNs.get(c.ns);
+    if (!anterior) { porNs.set(c.ns, c); continue; }
+    if (!anterior.origem.includes(origem)) anterior.origem.push(origem);
+    if (c.estado === 'ausente') anterior.estado = 'ausente';
+    if (c.estado === 'ausente') anterior.nota = AUSENTES[c.ns] || anterior.nota;
+  }
+  return [...porNs.values()];
+}
+const cache = new Map();
+const nivelDe = (apis) => apis.some((a) => a.estado === 'ausente') ? 'bad' : (apis.length ? 'warn' : 'ok');
+function check(extPath) {
+  const vazio = { level: 'ok', message: '', apis: [], verificadaEm: Date.now() };
+  if (!extPath) return vazio;
+  const manifestPath = path.join(extPath, 'manifest.json');
+  let mtime = 0; try { mtime = fs.statSync(manifestPath).mtimeMs; } catch (e) { return vazio; }
+  const chave = path.normalize(String(extPath)).toLowerCase();
+  const emCache = cache.get(chave);
+  if (emCache && emCache.mtime === mtime) return emCache.resultado;
+  const encontradas = [];
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const lista of ['permissions', 'optional_permissions']) { for (const p of (m[lista] || [])) { if (typeof p === 'string' && !p.includes('://')) encontradas.push({ ns: p, origem: 'manifest' }); } }
+  } catch (e) {}
+  for (const ns of scanCodigo(extPath)) encontradas.push({ ns, origem: 'codigo' });
+  const apis = fundir(encontradas);
+  const level = nivelDe(apis);
+  const resultado = { level, message: level === 'ok' ? '' : MSG_AVISO, apis, verificadaEm: Date.now() };
+  cache.set(chave, { mtime, resultado });
+  return resultado;
+}
+function limparCache() { cache.clear(); }
+module.exports = { check, limparCache, classificar, MSG_AVISO };
+
+--- FIM DO FICHEIRO: src\main\ext-compat.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\webstore-install.js ---
+=============================================================
+const { app, session, ipcMain } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const AdmZip = require('adm-zip');
+
+const ID_RE = /^[a-p]{32}$/;
+const DETAIL_RE = /\/detail\/(?:[^/]+\/)?([a-p]{32})(?:[/?#]|$)/;
+const STORE_URL = /^https:\/\/chromewebstore\.google\.com\//;
+const busy = new Set();
+let ctx = {};
+
+function parseId(input) {
+  const s = String(input || '').trim();
+  if (ID_RE.test(s)) return s;
+  try { const m = DETAIL_RE.exec(new URL(s).pathname); if (m) return m[1]; } catch {}
+  const m = DETAIL_RE.exec(s);
+  return m ? m[1] : null;
+}
+
+function crxToZip(buf) {
+  if (buf.length > 16 && buf.toString('latin1', 0, 4) === 'Cr24') {
+    const ver = buf.readUInt32LE(4);
+    if (ver === 3) return buf.subarray(12 + buf.readUInt32LE(8));
+    if (ver === 2) return buf.subarray(16 + buf.readUInt32LE(8) + buf.readUInt32LE(12));
+    throw new Error('Versao de CRX desconhecida: ' + ver);
+  }
+  if (buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4B) return buf;
+  throw new Error('O ficheiro descarregado nao e uma extensao valida.');
+}
+
+async function download(id) {
+  const prod = process.versions.chrome || '120.0.0.0';
+  const url = 'https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x64&os_arch=x86_64&nacl_arch=x86-64&prod=chromecrx&prodchannel=&prodversion=' +
+    prod + '&lang=pt-PT&acceptformat=crx2,crx3&x=' + encodeURIComponent('id=' + id + '&installsource=ondemand&uc');
+  const res = await fetch(url, { redirect: 'follow' });
+  if (res.status === 204 || res.status === 404) throw new Error('Esta extensao nao esta disponivel para download (foi removida da loja ou e restrita).');
+  if (!res.ok) throw new Error('Falha ao descarregar da Google (HTTP ' + res.status + ').');
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 100) throw new Error('A loja devolveu uma resposta vazia.');
+  return buf;
+}
+
+function extract(zipBuf, dir) {
+  const zip = new AdmZip(zipBuf);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const root = path.resolve(dir) + path.sep;
+  for (const e of zip.getEntries()) {
+    const name = e.entryName.replace(/\\/g, '/');
+    if (e.isDirectory || name.startsWith('_metadata/')) continue;
+    const dest = path.resolve(dir, name);
+    if (!dest.startsWith(root)) throw new Error('Ficheiro suspeito dentro da extensao: ' + name);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, e.getData());
+  }
+}
+
+function saveRegistry(dir) {
+  const file = path.join(app.getPath('userData'), 'extensions.json');
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  if (!Array.isArray(list)) list = [];
+  if (!list.includes(dir)) { list.push(dir); try { fs.writeFileSync(file, JSON.stringify(list)); } catch {} }
+  if (ctx.registerExtension) ctx.registerExtension(dir);
+}
+
+async function install(input) {
+  const id = parseId(input);
+  if (!id) return { success: false, error: 'Link ou ID invalido. Cola o link da pagina da extensao na Chrome Web Store.' };
+  if (busy.has(id)) return { success: false, error: 'Esta extensao ja esta a ser instalada.' };
+  busy.add(id);
+  try {
+    const dir = path.join(app.getPath('userData'), 'extensions', id);
+    const ses = session.defaultSession;
+    const zip = crxToZip(await download(id));
+    const norm = (p) => path.normalize(p).toLowerCase();
+    const old = ses.extensions.getAllExtensions().find((x) => norm(x.path) === norm(dir));
+    if (old) { try { ses.extensions.removeExtension(old.id); } catch {} }
+    extract(zip, dir);
+    const loaded = await ses.extensions.loadExtension(dir, { allowFileAccess: true });
+    saveRegistry(dir);
+    return { success: true, id: loaded.id, name: loaded.name };
+  } catch (e) {
+    let msg = e && e.message ? e.message : String(e);
+    if (/manifest/i.test(msg)) msg += ' (extensoes Manifest V2 ja nao sao suportadas pelo motor atual)';
+    return { success: false, error: msg };
+  } finally { busy.delete(id); }
+}
+
+const STORE_SCRIPT = String.raw`(function () {
+  if (window.__kortexStoreInit) return;
+  window.__kortexStoreInit = true;
+  var RE = /\/detail\/(?:[^\/]+\/)?([a-p]{32})(?:[\/?#]|$)/;
+  
+  function currentId() { var m = RE.exec(location.pathname); return m ? m[1] : null; }
+
+  function setup() {
+    var id = currentId();
+    if (!id) return;
+
+    // Procura o botão original do Google
+    var nativeBtn = document.querySelector('button[aria-label*="Add to Chrome"], button[aria-label*="Adicionar ao Chrome"], button[aria-label*="Instalar"]');
+    
+    // Se já temos o nosso botão, mas o do Google reapareceu, escondemos o do Google de novo
+    if (nativeBtn && document.getElementById('kortex-install-btn')) {
+        nativeBtn.style.setProperty('display', 'none', 'important');
+        return;
+    }
+
+    if (nativeBtn && !document.getElementById('kortex-install-btn')) {
+      // 1. Esconde o botão do Google de forma agressiva
+      nativeBtn.style.setProperty('display', 'none', 'important');
+      
+      // 2. Cria o nosso botão
+      var btn = document.createElement('button');
+      btn.id = 'kortex-install-btn';
+      btn.type = 'button';
+      // Estilo de pílula igual ao do Google
+      btn.style.cssText = 'padding:0 24px; height:48px; border:0; border-radius:999px; background:#ff5722; color:#fff; font:600 15px "Segoe UI",sans-serif; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2); transition: background 0.2s; display: flex; align-items: center; justify-content: center;';
+      btn.textContent = 'Instalar no Kortex';
+
+      var busy = false;
+      btn.addEventListener('click', function () {
+        if (busy) return;
+        if (!window.kortexStore) { btn.textContent = 'Reinicia o Kortex'; return; }
+        busy = true; btn.style.background = '#555'; btn.textContent = 'A instalar...';
+        window.kortexStore.install(id).then(function (r) {
+          if (r && r.success) { btn.style.background = '#10b981'; btn.textContent = 'Instalada!'; }
+          else { btn.style.background = '#e5342b'; btn.textContent = 'Erro: ' + ((r && r.error) || 'desconhecido'); }
+        }).catch(function (e) {
+          btn.style.background = '#e5342b'; btn.textContent = 'Erro: ' + (e.message || 'desconhecido');
+        }).then(function () {
+          setTimeout(function () { busy = false; btn.style.background = '#ff5722'; btn.textContent = 'Instalar no Kortex'; }, 5000);
+        });
+      });
+
+      // 3. Insere o nosso botão exatamente onde o do Google estava
+      nativeBtn.parentNode.insertBefore(btn, nativeBtn.nextSibling);
+    }
+  }
+
+  // Verifica a cada 500ms (a loja do Google recarrega os botões frequentemente)
+  setInterval(setup, 500);
+})();`;
+
+function attachView(view) {
+  const wc = view.webContents;
+  const run = () => {
+    try { if (STORE_URL.test(wc.getURL())) wc.executeJavaScript(STORE_SCRIPT, true).catch(() => {}); } catch {}
+  };
+  wc.on('dom-ready', run);
+  wc.on('did-navigate-in-page', run);
+}
+
+function init(c) {
+  ctx = c || {};
+  ipcMain.handle('store:install', (e, input) => {
+    const from = (e.senderFrame && e.senderFrame.url) || e.sender.getURL() || '';
+    if (!/^(kortex:|file:|https:\/\/chromewebstore\.google\.com\/)/.test(from)) return { success: false, error: 'Origem nao autorizada.' };
+    return install(input);
+  });
+}
+
+module.exports = { init, attachView, install, parseId, crxToZip, STORE_SCRIPT };
+
+--- FIM DO FICHEIRO: src\main\webstore-install.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\widevine.js ---
+=============================================================
+const { app, ipcMain } = require('electron');
+let iniciado = false;
+let pronto = false;
+let erro = null;
+function componentesDisponiveis() { try { const { components } = require('electron'); return !!(components && typeof components.start === 'function'); } catch (e) { return false; } }
+function start() {
+  if (iniciado) return;
+  iniciado = true;
+  try {
+    const { components } = require('electron');
+    if (!components || typeof components.start !== 'function') { erro = 'sem-castlabs'; console.warn('[Kortex] DRM: este Electron não inclui Widevine — troca o pacote "electron" pelo fork do castLabs.'); return; }
+    components.start();
+    console.log('[Kortex] DRM: componente Widevine a iniciar');
+    if (components.whenReady) { components.whenReady().then(() => { pronto = true; erro = null; console.log('[Kortex] DRM: Widevine CDM pronto (Netflix/Spotify desbloqueados)'); }).catch((e) => { erro = (e && e.message) || String(e); console.error('[Kortex] DRM:', erro); }); }
+  } catch (e) { erro = (e && e.message) || String(e); console.error('[Kortex] DRM:', erro); }
+}
+function init() {
+  ipcMain.handle('widevine:status', () => ({ disponivel: componentesDisponiveis(), pronto, erro }));
+  app.whenReady().then(() => start()).catch(() => {});
+}
+module.exports = { init };
+
+--- FIM DO FICHEIRO: src\main\widevine.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\google-session-reset.js ---
+=============================================================
+'use strict';
+const { session } = require('electron');
+const fs = require('fs');
+const path = require('path');
+
+const GOOGLE_DOMAINS = ['.google.com', '.gmail.com', '.youtube.com', '.google.pt', '.googleapis.com', '.gstatic.com'];
+
+async function resetGoogleSession(targetSession) {
+  try {
+    const cookies = await targetSession.cookies.get({});
+    for (const cookie of cookies) {
+      if (GOOGLE_DOMAINS.some(d => cookie.domain.endsWith(d))) {
+        await targetSession.cookies.remove(cookie.domain.startsWith('.') ? 'https://' + cookie.domain.substring(1) + cookie.path : 'https://' + cookie.domain + cookie.path, cookie.name);
+      }
+    }
+    // Limpar storage local do Gmail e Login
+    const origins = ['https://mail.google.com', 'https://accounts.google.com', 'https://www.youtube.com'];
+    for (const origin of origins) {
+      await targetSession.clearStorageData({ origin, storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers'] });
+    }
+    console.log('[Kortex] Sessao do Google limpa com sucesso.');
+  } catch (e) {
+    console.error('[Kortex] Erro ao limpar sessao:', e);
+  }
+}
+
+module.exports = { resetGoogleSession };
+
+--- FIM DO FICHEIRO: src\main\google-session-reset.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\extensions-menu.js ---
+=============================================================
+// src/main/extensions-menu.js � popup do bot�o de extens�es.
+const path = require('path');
+const fs = require('fs');
+const { ipcMain, BrowserWindow, WebContentsView, screen, session } = require('electron');
+
+const WIDTH = 360; 
+const MAX_H = 500;
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+
+let ctx = null;
+let view = null;
+let visible = false;
+let hiddenAt = 0;
+let lastRect = null;
+let popupWin = null;
+
+const actionOf = (manifest) => (manifest && (manifest.action || manifest.browser_action || manifest.page_action)) || {};
+
+function popupOf(ex) {
+  const p = actionOf(ex.manifest).default_popup;
+  return typeof p === 'string' ? p.replace(/^\/+/, '') : '';
+}
+
+function displayName(ex) {
+  const n = String(ex.name || '').trim();
+  return !n || /^__MSG_/.test(n) ? path.basename(ex.path || 'Extens�o') : n;
+}
+
+function iconOf(ex) {
+  const m = ex.manifest || {};
+  const found = [];
+  const add = (v) => {
+    if (typeof v === 'string') found.push([48, v]);
+    else if (v && typeof v === 'object') Object.entries(v).forEach(([size, p]) => { if (typeof p === 'string') found.push([parseInt(size, 10) || 0, p]); });
+  };
+  add(actionOf(m).default_icon);
+  add(m.icons);
+  found.sort((a, b) => Math.abs(a[0] - 48) - Math.abs(b[0] - 48));
+
+  const root = path.resolve(ex.path);
+  for (const [, rel] of found) {
+    const file = path.resolve(root, rel.replace(/^\/+/, ''));
+    const mime = MIME[path.extname(file).toLowerCase()];
+    if (!mime || !file.startsWith(root + path.sep)) continue;
+    try {
+      if (fs.statSync(file).size > 300 * 1024) continue;
+      return `data:${mime};base64,` + fs.readFileSync(file).toString('base64');
+    } catch (e) {}
+  }
+  return '';
+}
+
+function list() {
+  const all = session.defaultSession.extensions.getAllExtensions().filter((ex) => !ctx.isDisabled(ex.path));
+  const fullAccess = [];
+  const limitedAccess = [];
+  const noAccess = [];
+
+  all.forEach((ex) => {
+    const manifest = ex.manifest || {};
+    const perms = manifest.host_permissions || [];
+    const hasAllUrls = perms.some(p => p === '<all_urls>' || p === '*://*/*' || p === 'http://*/*' || p === 'https://*/*');
+    
+    const item = { id: ex.id, name: displayName(ex), version: ex.version || '', icon: iconOf(ex), hasPopup: !!popupOf(ex) };
+    if (hasAllUrls) fullAccess.push(item);
+    else if (perms.length > 0) limitedAccess.push(item);
+    else noAccess.push(item);
+  });
+
+  const sortByName = (a, b) => a.name.localeCompare(b.name, 'pt');
+  fullAccess.sort(sortByName);
+  limitedAccess.sort(sortByName);
+  noAccess.sort(sortByName);
+
+  return {
+    groups: [
+      { title: 'Acesso completo', desc: 'Estas extens�es podem ver e alterar as informa��es neste site.', items: fullAccess },
+      { title: 'Acesso limitado', desc: 'Estas extens�es podem ver e alterar informa��es em sites espec�ficos.', items: limitedAccess },
+      { title: 'N�o � necess�rio acesso', desc: 'Estas extens�es n�o precisam de ver nem de alterar informa��es neste site.', items: noAccess }
+    ].filter(g => g.items.length > 0)
+  };
+}
+
+function hide() {
+  visible = false;
+  if (view && !view.webContents.isDestroyed()) view.setVisible(false);
+}
+
+function show(rect) {
+  const data = list();
+  const groupsCount = data.groups.length;
+  const itemsCount = data.groups.reduce((acc, g) => acc + g.items.length, 0);
+  
+  let finalHeight = 120 + (groupsCount * 82) + (itemsCount * 40);
+  finalHeight = Math.min(Math.max(finalHeight, 160), MAX_H);
+
+  view.setBounds({
+    x: Math.max(8, Math.round(rect.x + rect.width - WIDTH)),
+    y: Math.round(rect.y + rect.height + 6),
+    width: WIDTH,
+    height: finalHeight
+  });
+  
+  ctx.raise();
+  view.webContents.send('extmenu:render', data);
+  view.setVisible(true);
+  view.webContents.focus();
+  visible = true;
+}
+
+function openPopup(id) {
+  hide();
+  const ex = session.defaultSession.extensions.getExtension(id);
+  if (!ex || ctx.isDisabled(ex.path)) return false;
+  const popup = popupOf(ex);
+  if (!popup) { ctx.toast(`"${displayName(ex)}" n�o tem menu para abrir.`); return false; }
+
+  if (popupWin && !popupWin.isDestroyed()) popupWin.close();
+  
+  const win = ctx.getMainWindow();
+  // Obt�m o tamanho da janela principal para calcular os limites
+  const content = win.getContentBounds();
+  // Obt�m a �rea �til do ecr� (sem a barra de tarefas)
+  const area = screen.getDisplayMatching(win.getBounds()).workArea;
+  
+  // Coordenadas do bot�o das extens�es
+  const btnX = lastRect ? lastRect.x + lastRect.width : content.width - 16;
+  const btnY = lastRect ? lastRect.y + lastRect.height : 80;
+
+  // Cria a janela escondida
+  popupWin = new BrowserWindow({
+    width: 10, height: 10, x: 0, y: 0, frame: false, resizable: false, show: false, alwaysOnTop: true, skipTaskbar: true,
+    backgroundColor: '#1a1b1d',
+    webPreferences: { session: session.defaultSession, nodeIntegration: false, contextIsolation: true, sandbox: true }
+  });
+  
+  const w = popupWin;
+  w.loadURL(`chrome-extension://${ex.id}/${popup}`);
+  w.on('blur', () => { if (!w.isDestroyed()) w.close(); });
+  
+  w.webContents.on('did-finish-load', () => {
+    setTimeout(async () => {
+      if (w.isDestroyed()) return;
+      try {
+        const size = await w.webContents.executeJavaScript('({ w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight })');
+        
+        const cw = Math.min(800, Math.max(200, Math.ceil(size.w)));
+        const ch = Math.min(600, Math.max(100, Math.ceil(size.h)));
+
+        w.setContentSize(cw, ch);
+        
+        // Alinhamento perfeito: o canto direito do popup alinha com o canto direito do bot�o.
+        // O topo do popup fica 6px abaixo do fundo do bot�o.
+        let targetX = btnX - cw;
+        let targetY = btnY + 6;
+
+        // Se sair do ecr� pela esquerda, empurra para a direita (margem de 8px)
+        if (targetX < area.x + 8) targetX = area.x + 8;
+        // Se sair do ecr� pela direita, puxa para a esquerda
+        if (targetX + cw > area.x + area.width) targetX = area.x + area.width - cw - 8;
+
+        // Se sair do ecr� por baixo, tenta abrir para cima
+        if (targetY + ch > area.y + area.height) {
+           targetY = btnY - ch - 6;
+        }
+
+        // Posiciona
+        w.setPosition(Math.round(targetX), Math.round(targetY));
+        w.show();
+        
+      } catch (e) {
+        w.show();
+      }
+    }, 150);
+  });
+  return true;
+}
+
+function validRect(r) {
+  return r && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(r[k]));
+}
+
+function create(context, preload, htmlFile) {
+  ctx = context;
+  view = new WebContentsView({ webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: false } });
+  view.setBackgroundColor('#00000000');
+  view.setVisible(false);
+  view.webContents.loadFile(htmlFile);
+  view.webContents.on('blur', () => { if (visible) { hide(); hiddenAt = Date.now(); } });
+
+  ipcMain.on('extmenu:toggle', (e, rect) => {
+    if (e.sender !== ctx.getChromeView().webContents || !validRect(rect)) return;
+    if (visible) { hide(); return; }
+    if (Date.now() - hiddenAt < 250) return;
+    lastRect = rect;
+    show(rect);
+  });
+  ipcMain.on('extmenu:open', (e, id) => { if (e.sender === view.webContents && typeof id === 'string') openPopup(id); });
+  ipcMain.on('extmenu:manage', (e) => { if (e.sender === view.webContents) { hide(); ctx.navigateActive('kortex://extensions'); } });
+  ipcMain.on('extmenu:store', (e) => { if (e.sender === view.webContents) { hide(); ctx.navigateActive('kortex://store'); } });
+  ipcMain.on('extmenu:close', (e) => { if (e.sender === view.webContents) hide(); });
+  return view;
+}
+
+module.exports = { create, hide, openPopup, popupOf, iconOf };
+
+
+--- FIM DO FICHEIRO: src\main\extensions-menu.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\secrets.js ---
+=============================================================
+// src/main/secrets.js — cifra de segredos (palavras-passe, chave da API) com o safeStorage do Electron.
+// No Windows usa a DPAPI: só o mesmo utilizador do Windows, neste PC, consegue decifrar.
+// Formato guardado: "enc:v1:<base64>". Texto sem este prefixo é tratado como valor antigo em texto simples (migração).
+const { safeStorage } = require('electron');
+
+const PREFIX = 'enc:v1:';
+
+const available = () => { try { return safeStorage.isEncryptionAvailable(); } catch { return false; } };
+const isEncrypted = (v) => typeof v === 'string' && v.startsWith(PREFIX);
+
+// Devolve o valor cifrado; se a cifra não estiver disponível devolve null (quem chama decide o que fazer).
+function encrypt(plain) {
+  if (plain === '' || plain == null) return '';
+  if (!available()) return null;
+  return PREFIX + safeStorage.encryptString(String(plain)).toString('base64');
+}
+
+// Devolve { value, wasPlain }. Valores que não se conseguem decifrar (outro utilizador/PC) dão ''.
+function decrypt(stored) {
+  if (stored === '' || stored == null) return { value: '', wasPlain: false };
+  if (!isEncrypted(stored)) return { value: String(stored), wasPlain: true };
+  try { return { value: safeStorage.decryptString(Buffer.from(stored.slice(PREFIX.length), 'base64')), wasPlain: false }; }
+  catch { return { value: '', wasPlain: false }; }
+}
+
+module.exports = { encrypt, decrypt, isEncrypted, available };
+
+
+--- FIM DO FICHEIRO: src\main\secrets.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\updater.js ---
+=============================================================
+'use strict';
+const { app, WebContentsView } = require('electron');
+
+const OVERLAY_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;height:100%;font-family:system-ui,"Segoe UI",Roboto,sans-serif;background:#0f1012;color:#e8eaed;user-select:none;cursor:default}
+body{display:flex;align-items:center;justify-content:center}
+.card{width:min(460px,86vw);text-align:center}
+.logo{font-size:46px;font-weight:700;color:#ff6a2b;margin-bottom:6px}
+h1{font-size:20px;margin:6px 0 4px}
+p{margin:6px 0;color:#9aa0a6;font-size:14px;line-height:1.5;word-break:break-word}
+.bar{height:8px;border-radius:99px;background:#2a2c30;overflow:hidden;margin:20px 0 8px}
+.bar>i{display:block;height:100%;width:0;background:#ff6a2b;transition:width .25s}
+.bar.ind>i{width:35%;animation:ind 1.1s infinite ease-in-out}
+@keyframes ind{0%{margin-left:-35%}100%{margin-left:100%}}
+.btns{margin-top:18px;display:none;gap:10px;justify-content:center}
+.btns a{padding:9px 20px;border-radius:99px;text-decoration:none;font-size:14px;background:#ff6a2b;color:#fff;cursor:pointer}
+.btns a.sec{background:#2a2c30;color:#e8eaed}
+</style></head><body><div class="card">
+<div class="logo">K</div>
+<h1 id="t">Atualização obrigatória</h1>
+<p id="m"></p>
+<div class="bar ind" id="b"><i id="p"></i></div>
+<p id="s"></p>
+<div class="btns" id="x"><a href="kortex-update://retry">Tentar novamente</a><a class="sec" href="kortex-update://quit">Sair</a></div>
+</div>
+<script>
+window.__kx = function (s) {
+  var g = function (id) { return document.getElementById(id); };
+  g('t').textContent = s.title || '';
+  g('m').textContent = s.message || '';
+  g('s').textContent = s.detail || '';
+  var b = g('b'), p = g('p');
+  if (typeof s.percent === 'number') { b.className = 'bar'; p.style.width = s.percent + '%'; }
+  else { b.className = 'bar ind'; p.style.width = ''; }
+  b.style.display = s.hideBar ? 'none' : 'block';
+  g('x').style.display = s.buttons ? 'flex' : 'none';
+};
+</script></body></html>`;
+
+let updater = null;
+let win = null;
+let overlay = null;
+let overlayReady = false;
+let lastState = null;
+let keepTopTimer = null;
+let blocking = false;
+let checking = false;
+let downloading = false;
+let pendingVersion = '';
+let opts = {};
+
+const log = (...a) => console.log('[updater]', ...a);
+const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+
+const ST = {
+  checking: () => ({ title: 'A verificar atualização…', message: 'Um momento.', buttons: false }),
+  downloading: (pct, detail) => ({
+    title: 'Atualização obrigatória',
+    message: 'A transferir a versão ' + pendingVersion + ' do Kortex. O navegador reinicia sozinho no fim.',
+    percent: pct, detail: detail || '', buttons: false
+  }),
+  installing: () => ({
+    title: 'A instalar…', message: 'O Kortex vai reiniciar já a seguir.', percent: 100, detail: '', buttons: false
+  }),
+  error: (msg) => ({
+    title: 'Não foi possível atualizar',
+    message: 'O Kortex precisa desta atualização para continuar.',
+    detail: String(msg || '').slice(0, 220) + ' — verifica a ligação à internet e tenta de novo.',
+    hideBar: true, buttons: true
+  })
+};
+
+function setState(state) {
+  lastState = state;
+  if (!overlay || overlay.webContents.isDestroyed() || !overlayReady) return;
+  overlay.webContents.executeJavaScript('window.__kx(' + JSON.stringify(state) + ')').catch(() => {});
+}
+
+function layout() {
+  if (!overlay || !win || win.isDestroyed()) return;
+  const b = win.getContentBounds();
+  overlay.setBounds({ x: 0, y: 0, width: b.width, height: b.height });
+}
+
+function showOverlay() {
+  if (overlay) return;
+  win = typeof opts.getWindow === 'function' ? opts.getWindow() : null;
+  if (!win || win.isDestroyed()) { setTimeout(showOverlay, 500); return; }
+
+  overlay = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  const wc = overlay.webContents;
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('will-navigate', (e, url) => {
+    e.preventDefault();
+    if (url === 'kortex-update://retry') retry();
+    else if (url === 'kortex-update://quit') app.quit();
+  });
+  wc.on('did-finish-load', () => { overlayReady = true; if (lastState) setState(lastState); });
+
+  win.contentView.addChildView(overlay);
+  layout();
+  win.on('resize', layout);
+  win.on('enter-full-screen', layout);
+  win.on('leave-full-screen', layout);
+  wc.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(OVERLAY_HTML));
+  wc.focus();
+
+  keepTopTimer = setInterval(() => {
+    if (!overlay || !win || win.isDestroyed() || overlay.webContents.isDestroyed()) return;
+    try {
+      const kids = win.contentView.children;
+      if (kids[kids.length - 1] !== overlay) win.contentView.addChildView(overlay);
+      if (!overlay.webContents.isFocused()) overlay.webContents.focus();
+    } catch (e) {}
+  }, 600);
+}
+
+function hideOverlay() {
+  if (keepTopTimer) { clearInterval(keepTopTimer); keepTopTimer = null; }
+  if (!overlay) return;
+  try {
+    if (win && !win.isDestroyed()) {
+      win.removeListener('resize', layout);
+      win.removeListener('enter-full-screen', layout);
+      win.removeListener('leave-full-screen', layout);
+      win.contentView.removeChildView(overlay);
+    }
+    if (!overlay.webContents.isDestroyed()) overlay.webContents.close();
+  } catch (e) {}
+  overlay = null; overlayReady = false; lastState = null;
+}
+
+async function check() {
+  if (!updater || checking || downloading) return;
+  checking = true;
+  try { await updater.checkForUpdates(); } catch (e) {} finally { checking = false; }
+}
+
+function retry() {
+  if (!blocking) return;
+  downloading = false;
+  setState(ST.checking());
+  check();
+}
+
+function install() {
+  try { if (typeof opts.onBeforeInstall === 'function') opts.onBeforeInstall(); } catch (e) {}
+  updater.quitAndInstall(true, true);
+  setTimeout(() => { try { app.exit(0); } catch (e) {} }, 8000);
+}
+
+function init(options = {}) {
+  opts = Object.assign({ mandatory: true, intervalMs: 15 * 60 * 1000, firstCheckDelayMs: 2000 }, options);
+
+  if (process.env.KORTEX_FAKE_UPDATE) return simulate();
+  log('app isPackaged:', app.isPackaged);
+
+  try { updater = require('electron-updater').autoUpdater; }
+  catch (e) { console.warn('[updater] electron-updater nao esta instalado — atualizacoes desativadas'); return; }
+
+  updater.allowPrerelease = false;
+  updater.allowDowngrade = false;
+  updater.logger = null;
+
+  if (!opts.mandatory) {
+    updater.autoDownload = true;
+    updater.autoInstallOnAppQuit = true;
+    updater.on('error', (e) => log('erro:', e && e.message));
+    setTimeout(check, opts.firstCheckDelayMs);
+    setInterval(check, opts.intervalMs);
+    return;
+  }
+
+  updater.autoDownload = false;
+  updater.autoInstallOnAppQuit = false;
+
+  updater.on('update-available', (info) => {
+    if (downloading) return;
+    pendingVersion = info && info.version ? info.version : '';
+    blocking = true; downloading = true;
+    showOverlay();
+    setState(ST.downloading(0, ''));
+    log('nova versao', pendingVersion, '— a transferir');
+    updater.downloadUpdate().catch(() => {});
+  });
+
+  updater.on('update-not-available', () => {
+    if (blocking) { blocking = false; downloading = false; hideOverlay(); }
+  });
+
+  updater.on('download-progress', (p) => {
+    const detail = mb(p.transferred) + ' / ' + mb(p.total) + '  ·  ' + mb(p.bytesPerSecond) + '/s';
+    setState(ST.downloading(Math.round(p.percent), detail));
+  });
+
+  updater.on('update-downloaded', () => {
+    downloading = false;
+    setState(ST.installing());
+    setTimeout(install, 1200);
+  });
+
+  updater.on('error', (err) => {
+    log('erro:', err && err.message);
+    downloading = false;
+    if (blocking) setState(ST.error(err && err.message));
+  });
+
+  setTimeout(check, opts.firstCheckDelayMs);
+  setInterval(() => { if (!blocking) check(); }, opts.intervalMs);
+}
+
+function checkNow() { return check(); }
+
+function simulate() {
+  setTimeout(() => {
+    pendingVersion = '9.9.9';
+    blocking = true;
+    showOverlay();
+    let pct = 0;
+    setState(ST.downloading(0, '0.0 MB / 80.0 MB'));
+    const t = setInterval(() => {
+      pct += 4;
+      if (pct >= 100) {
+        clearInterval(t);
+        setState(ST.installing());
+        setTimeout(() => { blocking = false; hideOverlay(); }, 2500);
+        return;
+      }
+      setState(ST.downloading(pct, mb(pct * 800000) + ' / 80.0 MB'));
+    }, 150);
+  }, 1500);
+}
+
+module.exports = { init, checkNow, isBlocking: () => blocking };
+
+--- FIM DO FICHEIRO: src\main\updater.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\default-browser.js ---
+=============================================================
+'use strict';
+const { app, dialog, shell } = require('electron');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { pathToFileURL } = require('url');
+const { execFileSync } = require('child_process');
+
+const PROTOCOLS = ['http', 'https'];
+const FILE_EXTS = new Set(['.html', '.htm', '.xhtml', '.pdf', '.svg']);
+const log = (...a) => console.log('[default-browser]', ...a);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function stateFile() { return path.join(app.getPath('userData'), 'first-run.json'); }
+function readState() { try { return JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch (e) { return {}; } }
+function writeState(patch) { try { fs.writeFileSync(stateFile(), JSON.stringify(Object.assign(readState(), patch))); } catch (e) {} }
+function resetPrompt() { writeState({ defaultBrowserAsked: false }); }
+
+let isDefaultCache = null;
+function isDefault() {
+  if (isDefaultCache && Date.now() - isDefaultCache.at < 3000) return isDefaultCache.value;
+  let value = false;
+  try {
+    const handler = String(app.getApplicationNameForProtocol('https://') || '').toLowerCase();
+    if (handler) {
+      const names = [app.getName(), path.basename(process.execPath, path.extname(process.execPath))].map((s) => String(s || '').toLowerCase()).filter(Boolean);
+      value = names.some((n) => handler.includes(n));
+    } else {
+      value = PROTOCOLS.every((p) => app.isDefaultProtocolClient(p));
+    }
+  } catch (e) { value = false; }
+  isDefaultCache = { value, at: Date.now() };
+  return value;
+}
+
+const WIN_APP_NAME = 'Kortex';
+const WIN_FILE_EXTS = ['.htm', '.html', '.xhtml', '.pdf', '.svg'];
+
+function regEsc(v) { return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
+function winCommands() {
+  const exe = process.execPath;
+  const open = app.isPackaged ? '"' + exe + '"' : '"' + exe + '" "' + app.getAppPath() + '"';
+  return { exe, open, withArg: open + ' "%1"' };
+}
+
+function buildRegistrationReg() {
+  const { exe, open, withArg } = winCommands();
+  const root = 'HKEY_CURRENT_USER\\Software\\';
+  const cap = 'Clients\\StartMenuInternet\\' + WIN_APP_NAME + '\\Capabilities';
+  const out = ['Windows Registry Editor Version 5.00', ''];
+  const section = (key, pairs) => {
+    out.push('[' + root + key + ']');
+    pairs.forEach(([n, v]) => out.push((n === '@' ? '@' : '"' + regEsc(n) + '"') + '="' + regEsc(v) + '"'));
+    out.push('');
+  };
+  section('Classes\\KortexURL', [['@', 'Kortex URL'], ['URL Protocol', '']]);
+  section('Classes\\KortexURL\\DefaultIcon', [['@', exe + ',0']]);
+  section('Classes\\KortexURL\\shell\\open\\command', [['@', withArg]]);
+  section('Classes\\KortexHTML', [['@', 'Kortex Document']]);
+  section('Classes\\KortexHTML\\DefaultIcon', [['@', exe + ',0']]);
+  section('Classes\\KortexHTML\\shell\\open\\command', [['@', withArg]]);
+  section('Clients\\StartMenuInternet\\' + WIN_APP_NAME, [['@', WIN_APP_NAME]]);
+  section('Clients\\StartMenuInternet\\' + WIN_APP_NAME + '\\DefaultIcon', [['@', exe + ',0']]);
+  section(cap, [['ApplicationName', WIN_APP_NAME], ['ApplicationDescription', 'Kortex Browser'], ['ApplicationIcon', exe + ',0']]);
+  section(cap + '\\URLAssociations', [['http', 'KortexURL'], ['https', 'KortexURL']]);
+  section(cap + '\\FileAssociations', WIN_FILE_EXTS.map((e) => [e, 'KortexHTML']));
+  section('Clients\\StartMenuInternet\\' + WIN_APP_NAME + '\\shell\\open\\command', [['@', open]]);
+  section('RegisteredApplications', [[WIN_APP_NAME, 'Software\\' + cap]]);
+  return out.join('\r\n');
+}
+
+function buildUnregistrationReg() {
+  const root = 'HKEY_CURRENT_USER\\Software\\';
+  return [
+    'Windows Registry Editor Version 5.00', '',
+    '[-' + root + 'Classes\\KortexURL]', '',
+    '[-' + root + 'Classes\\KortexHTML]', '',
+    '[-' + root + 'Clients\\StartMenuInternet\\' + WIN_APP_NAME + ']', '',
+    '[' + root + 'RegisteredApplications]', '"' + WIN_APP_NAME + '"=-', ''
+  ].join('\r\n');
+}
+
+function buildOpenWithProgidsReg() {
+  const root = 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\';
+  const out = ['Windows Registry Editor Version 5.00', ''];
+  WIN_FILE_EXTS.forEach((ext) => {
+    out.push('[' + root + ext + '\\OpenWithProgids]');
+    out.push('"KortexHTML"=hex(0):');
+    out.push('');
+  });
+  return out.join('\r\n');
+}
+
+function buildOpenWithProgidsRemovalReg() {
+  const root = 'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\';
+  const out = ['Windows Registry Editor Version 5.00', ''];
+  WIN_FILE_EXTS.forEach((ext) => {
+    out.push('[' + root + ext + '\\OpenWithProgids]');
+    out.push('"KortexHTML"=-');
+    out.push('');
+  });
+  return out.join('\r\n');
+}
+
+function importReg(text) {
+  const file = path.join(os.tmpdir(), 'kortex-' + Date.now() + '.reg');
+  fs.writeFileSync(file, Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(text, 'utf16le')]));
+  try { execFileSync('reg', ['import', file], { windowsHide: true, stdio: 'ignore' }); return true; }
+  catch (e) { log('reg import falhou:', e && e.message); return false; }
+  finally { try { fs.unlinkSync(file); } catch (e) {} }
+}
+
+function registerWindows() {
+  if (process.platform !== 'win32') return false;
+  const a = importReg(buildRegistrationReg());
+  const b = importReg(buildOpenWithProgidsReg());
+  if (!b) log('aviso: OpenWithProgids não foi escrito');
+  return a;
+}
+
+function unregisterWindows() {
+  if (process.platform !== 'win32') return false;
+  importReg(buildOpenWithProgidsRemovalReg());
+  return importReg(buildUnregistrationReg());
+}
+
+function openWindowsDefaultApps() {
+  const build = parseInt(String(os.release()).split('.')[2], 10) || 0;
+  const url = build >= 22000 ? 'ms-settings:defaultapps?registeredAppUser=' + encodeURIComponent(WIN_APP_NAME) : 'ms-settings:defaultapps';
+  return shell.openExternal(url).catch(() => {});
+}
+
+async function makeDefault({ parentWindow } = {}) {
+  const win = process.platform === 'win32';
+  if (!win && !app.isPackaged) return { ok: false, reason: 'not-packaged' };
+
+  let ok = true;
+  if (win) {
+    ok = registerWindows();
+    log('registo no Windows (HKCU):', ok ? 'ok' : 'FALHOU');
+    if (!ok) {
+      await dialog.showMessageBox(parentWindow || undefined, {
+        type: 'error', title: 'Kortex', message: 'Não foi possível registar o Kortex no Windows.',
+        detail: 'Verifica se tens permissões de escrita no teu perfil de utilizador e tenta novamente.'
+      });
+      return { ok: false, needsUserAction: true };
+    }
+    await sleep(600);
+    await dialog.showMessageBox(parentWindow || undefined, {
+      type: 'info', title: 'Kortex',
+      message: 'Falta só um passo — tem de ser feito pelo Windows.',
+      detail: 'O Kortex já está pronto para ser escolhido. Nas Definições que vão abrir, carrega em ' +
+        '"Set default" junto ao Kortex. O Windows 11 só aceita a mudança de navegador predefinido ' +
+        'quando é o próprio utilizador a confirmar ali — nenhuma app o pode fazer por ti.',
+      buttons: ['Abrir Definições'], defaultId: 0, noLink: true
+    });
+    await openWindowsDefaultApps();
+  } else {
+    for (const p of PROTOCOLS) { try { ok = app.setAsDefaultProtocolClient(p) && ok; } catch (e) { ok = false; } }
+  }
+  return { ok, needsUserAction: win };
+}
+
+async function offerOnFirstRun({ getWindow, canPrompt } = {}) {
+  if (process.env.KORTEX_RESET_DEFAULT_PROMPT) resetPrompt();
+  if (readState().defaultBrowserAsked) { log('já foi perguntado antes: a saltar'); return; }
+  if (isDefault()) { log('o Kortex já é o predefinido'); writeState({ defaultBrowserAsked: true }); return; }
+  if (!app.isPackaged && !process.env.KORTEX_FORCE_DEFAULT_PROMPT) { log('modo dev: pergunta desativada'); return; }
+
+  for (let i = 0; i < 30 && typeof canPrompt === 'function' && !canPrompt(); i++) await sleep(2000);
+
+  const win = process.platform === 'win32';
+  const mac = process.platform === 'darwin';
+  const opts = {
+    type: 'question', title: 'Kortex', message: 'Tornar o Kortex o teu navegador predefinido?',
+    detail: win ? 'O Windows vai abrir as Definições: em "Navegador web" escolhe Kortex.' : (mac ? 'O macOS vai pedir-te para confirmar a mudança.' : 'Os links de outras aplicações passam a abrir no Kortex.'),
+    buttons: ['Tornar predefinido', 'Agora não'], defaultId: 0, cancelId: 1, noLink: true
+  };
+  const parent = typeof getWindow === 'function' ? getWindow() : null;
+  try { if (parent && !parent.isDestroyed()) { parent.show(); parent.focus(); } } catch (e) {}
+  let r;
+  try { r = await (parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts)); }
+  catch (e) { r = await dialog.showMessageBox(opts); }
+  writeState({ defaultBrowserAsked: true });
+  log('resposta:', r.response === 0 ? 'tornar predefinido' : 'agora não');
+  if (r.response === 0) log('resultado:', JSON.stringify(await makeDefault({ parentWindow: parent })));
+}
+
+function isSafeWebUrl(u) { try { const p = new URL(u).protocol; return p === 'http:' || p === 'https:'; } catch (e) { return false; } }
+function fileToUrl(p) { try { const abs = path.resolve(p); if (FILE_EXTS.has(path.extname(abs).toLowerCase()) && fs.statSync(abs).isFile()) return pathToFileURL(abs).href; } catch (e) {} return null; }
+function urlFromArgv(argv) {
+  for (const a of (argv || []).slice(1)) {
+    if (!a || a.startsWith('-')) continue;
+    if (isSafeWebUrl(a)) return a;
+    const f = fileToUrl(a); if (f) return f;
+  }
+  return null;
+}
+
+let openUrlFn = null;
+const pending = [];
+function deliver(url) { if (!url) return; if (openUrlFn) openUrlFn(url); else pending.push(url); }
+
+app.on('open-url', (e, url) => { e.preventDefault(); if (isSafeWebUrl(url)) deliver(url); });
+app.on('open-file', (e, filePath) => { e.preventDefault(); deliver(fileToUrl(filePath)); });
+
+function init({ openUrl, getWindow, canPrompt, handleSecondInstance = false, handleColdStart = false, offerDelayMs = 1500 } = {}) {
+  if (typeof openUrl !== 'function') throw new Error('default-browser: init({ openUrl }) é obrigatório');
+  openUrlFn = openUrl;
+  log('init | instalada:', app.isPackaged, '| já é predefinido:', isDefault());
+  if (handleSecondInstance) app.on('second-instance', (_e, argv) => deliver(urlFromArgv(argv)));
+  if (handleColdStart) deliver(urlFromArgv(process.argv));
+  while (pending.length) openUrlFn(pending.shift());
+  setTimeout(() => { offerOnFirstRun({ getWindow, canPrompt }).catch((e) => log('erro na pergunta:', e && e.message)); }, offerDelayMs);
+}
+
+module.exports = { init, isDefault, makeDefault, offerOnFirstRun, resetPrompt, urlFromArgv, registerWindows, unregisterWindows };
+
+--- FIM DO FICHEIRO: src\main\default-browser.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\google-compat.js ---
+=============================================================
+'use strict';
+const path = require('path');
+const { app, session } = require('electron');
+
+const FULL = (process.versions && process.versions.chrome) || '131.0.0.0';
+const MAJOR = Number(String(FULL).split('.')[0]) || 131;
+
+const GREASE_CHARS = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+const GREASE_VERSIONS = ['8', '99', '24'];
+const ORDERS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
+function buildBrandList(seed, version, fullList) {
+  const brand = 'Not' + GREASE_CHARS[seed % GREASE_CHARS.length] + 'A' + GREASE_CHARS[(seed + 1) % GREASE_CHARS.length] + 'Brand';
+  const gv = GREASE_VERSIONS[seed % GREASE_VERSIONS.length];
+  const order = ORDERS[seed % ORDERS.length];
+  const list = [];
+  list[order[0]] = { brand, version: fullList ? gv + '.0.0.0' : gv };
+  list[order[1]] = { brand: 'Chromium', version };
+  list[order[2]] = { brand: 'Google Chrome', version };
+  return list;
+}
+const fmt = (list) => list.map((b) => `"${b.brand}";v="${b.version}"`).join(', ');
+
+const BRANDS = buildBrandList(MAJOR, String(MAJOR), false);
+const BRANDS_FULL = buildBrandList(MAJOR, FULL, true);
+const GREASE_BRAND = BRANDS.find((b) => b.brand !== 'Chromium' && b.brand !== 'Google Chrome').brand;
+
+const PLATFORM_VERSION = '15.0.0';
+const UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${MAJOR}.0.0.0 Safari/537.36`;
+const SEC_CH_UA = fmt(BRANDS);
+const SEC_CH_UA_FULL = fmt(BRANDS_FULL);
+const SPOOF_PATH = path.join(__dirname, '../preload/chrome-spoof.js');
+
+try { app.userAgentFallback = UA; } catch (e) {}
+
+const AUTH_HOSTS = new Set(['accounts.google.com', 'accounts.youtube.com']);
+const isGoogleAuthHost = (h) => AUTH_HOSTS.has(String(h || '').toLowerCase());
+const isGoogleHost = (h) => /(^|\.)(google\.com|youtube\.com)$/i.test(String(h || ''));
+
+function isGoogleAuthUrl(u) {
+  try {
+    const x = new URL(u);
+    if (isGoogleAuthHost(x.hostname)) return true;
+    return x.hostname === 'www.google.com' && /^\/(accounts|o\/oauth2|signin)/.test(x.pathname);
+  } catch (e) { return false; }
+}
+
+function setHeader(headers, name, value) {
+  const n = name.toLowerCase();
+  for (const k of Object.keys(headers)) if (k.toLowerCase() === n) delete headers[k];
+  headers[name] = value;
+}
+const hasHeader = (headers, name) => Object.keys(headers).some((k) => k.toLowerCase() === name);
+
+function fixRequestHeaders(details, headers) {
+  const url = details.url || '';
+  if (!/^https?:/i.test(url)) return;
+  setHeader(headers, 'User-Agent', UA);
+  if (!url.startsWith('https:')) return;
+  setHeader(headers, 'sec-ch-ua', SEC_CH_UA);
+  setHeader(headers, 'sec-ch-ua-mobile', '?0');
+  setHeader(headers, 'sec-ch-ua-platform', '"Windows"');
+  if (hasHeader(headers, 'sec-ch-ua-full-version-list')) setHeader(headers, 'sec-ch-ua-full-version-list', SEC_CH_UA_FULL);
+  if (hasHeader(headers, 'sec-ch-ua-full-version')) setHeader(headers, 'sec-ch-ua-full-version', `"${FULL}"`);
+  if (hasHeader(headers, 'sec-ch-ua-platform-version')) setHeader(headers, 'sec-ch-ua-platform-version', `"${PLATFORM_VERSION}"`);
+  if (hasHeader(headers, 'sec-ch-ua-arch')) setHeader(headers, 'sec-ch-ua-arch', '"x86"');
+  if (hasHeader(headers, 'sec-ch-ua-bitness')) setHeader(headers, 'sec-ch-ua-bitness', '"64"');
+  if (hasHeader(headers, 'sec-ch-ua-model')) setHeader(headers, 'sec-ch-ua-model', '""');
+  if (hasHeader(headers, 'sec-ch-ua-wow64')) setHeader(headers, 'sec-ch-ua-wow64', '?0');
+  if (hasHeader(headers, 'sec-ch-ua-form-factors')) setHeader(headers, 'sec-ch-ua-form-factors', '"Desktop"');
+}
+
+const wired = new WeakSet();
+const extraHooks = new WeakMap();
+
+function wireSession(ses) {
+  if (!ses || wired.has(ses)) return;
+  wired.add(ses);
+  try { ses.setUserAgent(UA); } catch (e) {}
+  try {
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      const headers = details.requestHeaders;
+      fixRequestHeaders(details, headers);
+      const extra = extraHooks.get(ses);
+      if (extra) { try { extra(details, headers); } catch (e) {} }
+      callback({ requestHeaders: headers });
+    });
+  } catch (e) {}
+  try {
+    if (typeof ses.registerPreloadScript === 'function') {
+      ses.registerPreloadScript({ id: 'kortex-chrome-spoof', type: 'frame', filePath: SPOOF_PATH });
+    } else {
+      const current = (ses.getPreloads && ses.getPreloads()) || [];
+      ses.setPreloads(current.filter((p) => p !== SPOOF_PATH).concat([SPOOF_PATH]));
+    }
+  } catch (e) {}
+}
+
+function install(ses, extraHook) {
+  const target = ses || session.defaultSession;
+  if (typeof extraHook === 'function') extraHooks.set(target, extraHook);
+  wireSession(target);
+}
+
+function applySession(ses) { wireSession(ses); }
+
+app.on('session-created', (ses) => wireSession(ses));
+
+function popupOptions(url) {
+  if (!isGoogleAuthUrl(url)) return null;
+  let sessionHasPreload = false;
+  try { sessionHasPreload = typeof session.defaultSession.registerPreloadScript === 'function'; } catch (e) {}
+  const webPreferences = { contextIsolation: true, nodeIntegration: false, sandbox: true };
+  if (!sessionHasPreload) { webPreferences.preload = SPOOF_PATH; webPreferences.sandbox = false; }
+  return {
+    action: 'allow',
+    overrideBrowserWindowOptions: {
+      width: 520, height: 720, minWidth: 420, minHeight: 560,
+      autoHideMenuBar: true, backgroundColor: '#202124', title: 'Iniciar sessão',
+      webPreferences
+    }
+  };
+}
+
+module.exports = {
+  UA, FULL, MAJOR, GREASE_BRAND, SEC_CH_UA, SEC_CH_UA_FULL, PLATFORM_VERSION, SPOOF_PATH,
+  install, applySession, fixRequestHeaders, isGoogleHost, isGoogleAuthHost, isGoogleAuthUrl, popupOptions
+};
+
+--- FIM DO FICHEIRO: src\main\google-compat.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: src\main\contrast-fix.js ---
+=============================================================
+'use strict';
+
+const CONTRAST_FIX_HOSTS = ['workspace.google.com', 'mail.google.com'];
+
+function contrastFix() {
+  var KEY = Symbol.for('kx.contrast');
+  if (document[KEY]) return document[KEY]();
+
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  var LIGHT = '#e8eaed';
+  var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1 };
+  var COLOR_RE = /(rgba?|color|lab|lch|oklab|oklch|hsla?|hwb)\([^)]*\)/g;
+  var fixed = new Map();
+
+  var cx = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  cx.canvas.width = 1; cx.canvas.height = 1;
+  function parse(c) {
+    if (!c) return null;
+    if (c === 'transparent') return { r: 0, g: 0, b: 0, a: 0 };
+    var m = /^rgba?\(([^)]+)\)$/.exec(c);
+    if (m) {
+      var p = m[1].split(/[\s,\/]+/).filter(Boolean).map(parseFloat);
+      return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    }
+    try {
+      cx.clearRect(0, 0, 1, 1);
+      cx.fillStyle = '#000'; cx.fillStyle = c;
+      cx.fillRect(0, 0, 1, 1);
+      var d = cx.getImageData(0, 0, 1, 1).data;
+      return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (e) { return null; }
+  }
+  function lin(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+  function lum(c) { return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b); }
+  function ratio(a, b) {
+    var l1 = lum(a), l2 = lum(b);
+    if (l1 < l2) { var t = l1; l1 = l2; l2 = t; }
+    return (l1 + 0.05) / (l2 + 0.05);
+  }
+  function over(f, b) {
+    var a = f.a;
+    return { r: f.r * a + b.r * (1 - a), g: f.g * a + b.g * (1 - a), b: f.b * a + b.b * (1 - a), a: 1 };
+  }
+  function clipsText(cs) { return (cs.webkitBackgroundClip || cs.backgroundClip) === 'text'; }
+
+  function up(n) {
+    if (n.parentElement) return n.parentElement;
+    var r = n.getRootNode && n.getRootNode();
+    return r && r.host ? r.host : null;
+  }
+
+  function bgOf(el, skipSelf) {
+    var layers = [], base = null;
+    for (var n = skipSelf ? up(el) : el; n && n.nodeType === 1; n = up(n)) {
+      var cs = getComputedStyle(n);
+      var c = parse(cs.backgroundColor);
+      if (c && c.a >= 0.95) { base = c; break; }
+      if (c && c.a > 0) layers.push(c);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') {
+        var stops = (cs.backgroundImage.match(COLOR_RE) || []).map(parse).filter(Boolean);
+        var solid = stops.filter(function (s) { return s.a >= 0.95; });
+        if (solid.length) {
+          var sum = { r: 0, g: 0, b: 0 };
+          solid.forEach(function (s) { sum.r += s.r; sum.g += s.g; sum.b += s.b; });
+          base = { r: sum.r / solid.length, g: sum.g / solid.length, b: sum.b / solid.length, a: 1 };
+          break;
+        }
+      }
+    }
+    if (!base) base = { r: 32, g: 33, b: 36, a: 1 };
+    for (var i = layers.length - 1; i >= 0; i--) base = over(layers[i], base);
+    return base;
+  }
+
+  function fgOf(cs, bg) {
+    var fill = parse(cs.webkitTextFillColor);
+    if (clipsText(cs) || (fill && fill.a === 0)) {
+      var stops = (cs.backgroundImage.match(COLOR_RE) || []).map(parse).filter(Boolean);
+      if (!stops.length) return null;
+      var best = over(stops[0], bg);
+      for (var i = 1; i < stops.length; i++) {
+        var s = over(stops[i], bg);
+        if (lum(s) > lum(best)) best = s;
+      }
+      return best;
+    }
+    var c = (fill && fill.a > 0) ? fill : parse(cs.color);
+    if (!c || c.a === 0) return null;
+    return over(c, bg);
+  }
+
+  function collect(root, out) {
+    var w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    var node, count = 0;
+    while ((node = w.nextNode()) && count++ < 40000) {
+      if (node.nodeType === 1) { if (node.shadowRoot) collect(node.shadowRoot, out); continue; }
+      var t = node.nodeValue;
+      if (!t || !t.trim()) continue;
+      var p = node.parentElement;
+      if (!p || SKIP[p.tagName]) continue;
+      out.add(p);
+    }
+  }
+
+  function put(el, prop, v) { if (v) el.style.setProperty(prop, v); else el.style.removeProperty(prop); }
+  function restore() {
+    fixed.forEach(function (orig, el) {
+      put(el, 'color', orig[0]);
+      put(el, '-webkit-text-fill-color', orig[1]);
+    });
+    fixed.clear();
+  }
+
+  function run() {
+    if (!mq.matches) { restore(); return { fixed: 0, scanned: 0, dark: false }; }
+    fixed.forEach(function (_, el) { if (!el.isConnected) fixed.delete(el); });
+
+    var parents = new Set();
+    collect(document.documentElement, parents);
+
+    var scanned = 0;
+    parents.forEach(function (el) {
+      if (fixed.has(el)) return;
+      scanned++;
+      var cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return;
+      var bg = bgOf(el, clipsText(cs));
+      if (lum(bg) > 0.2) return;
+      var fg = fgOf(cs, bg);
+      if (!fg) return;
+      var googleDark = Math.round(fg.r) === 32 && Math.round(fg.g) === 33 && Math.round(fg.b) === 36;
+      if (googleDark || ratio(fg, bg) < 3) {
+        fixed.set(el, [el.style.getPropertyValue('color'), el.style.getPropertyValue('-webkit-text-fill-color')]);
+        el.style.setProperty('color', LIGHT, 'important');
+        el.style.setProperty('-webkit-text-fill-color', LIGHT, 'important');
+      }
+    });
+    return { fixed: fixed.size, scanned: scanned, dark: true };
+  }
+
+  var timer = null;
+  function schedule() { clearTimeout(timer); timer = setTimeout(run, 150); }
+
+  Object.defineProperty(document, KEY, { value: run, configurable: true });
+  new MutationObserver(schedule).observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['class']
+  });
+  if (mq.addEventListener) mq.addEventListener('change', run);
+  window.addEventListener('load', schedule, { once: true });
+  window.addEventListener('scroll', schedule, { passive: true });
+  [500, 1500, 3000].forEach(function (ms) { setTimeout(run, ms); });
+  return run();
+}
+
+function applyContrastFix(wc) {
+  try {
+    if (!wc || wc.isDestroyed()) return;
+    const host = new URL(wc.getURL()).hostname;
+    if (!CONTRAST_FIX_HOSTS.includes(host)) return;
+    wc.executeJavaScript('(' + contrastFix.toString() + ')()')
+      .then((r) => { if (process.env.KORTEX_DEBUG) console.log('[contrastFix]', host, r); })
+      .catch((e) => { if (process.env.KORTEX_DEBUG) console.error('[contrastFix]', e); });
+  } catch (e) {}
+}
+
+module.exports = { applyContrastFix, contrastFix, CONTRAST_FIX_HOSTS };
+
+--- FIM DO FICHEIRO: src\main\contrast-fix.js ---
+
+=============================================================
+--- INICIO DO FICHEIRO: package.json ---
+=============================================================
+{
+    "name": "kortex",
+    "version": "1.0.11",
+    "description": "Kortex Browser",
+    "main": "src/main/main.js",
+    "scripts": {
+        "dev": "electron .",
+        "build": "electron-builder --win",
+        "release": "node scripts/release.js",
+        "size": "node scripts/size-report.js",
+        "dist": "electron-builder --win --publish never"
+    },
+    "devDependencies": {
+        "electron": "github:castlabs/electron-releases#v45.2.1+wvcus",
+        "electron-builder": "^24.13.3"
+    },
+    "dependencies": {
+        "adm-zip": "^0.6.1",
+        "electron-chrome-extensions": "^4.10.0",
+        "electron-updater": "^6.8.11",
+        "tldts": "^7.4.19"
+    },
+    "build": {
+        "appId": "com.kortex.browser",
+        "productName": "Kortex",
+        "directories": {
+            "output": "dist"
+        },
+        "electronDist": "node_modules/electron/dist",
+        "asar": true,
+        "compression": "maximum",
+        "electronLanguages": [
+            "en-US",
+            "pt-PT",
+            "pt-BR"
+        ],
+        "files": [
+            "package.json",
+            "src/**/*",
+            "assets/**/*",
+            "resources/**/*",
+            "!**/*.map",
+            "!**/*.d.ts",
+            "!src/**/*.{bak,old,log}",
+            "!src/**/*backup*/**",
+            "!src/**/*Backup*/**"
+        ],
+        "win": {
+            "target": "nsis",
+            "artifactName": "Kortex-Setup.${ext}"
+        },
+        "publish": [
+            {
+                "provider": "github",
+                "owner": "Paulvaljafd",
+                "repo": "kortex-releases",
+                "releaseType": "release"
+            }
+        ],
+        "nsis": {
+            "oneClick": true,
+            "perMachine": false,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true,
+            "allowToChangeInstallationDirectory": false,
+            "deleteAppDataOnUninstall": false,
+            "include": "build/installer.nsh"
+        }
+    }
+}
+
+
+--- FIM DO FICHEIRO: package.json ---
+
+=============================================================
+--- INICIO DO FICHEIRO: build\installer.nsh ---
+=============================================================
+!macro customInstall
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex" "" "Kortex"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\DefaultIcon" "" "$INSTDIR\Kortex.exe,0"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities" "ApplicationName" "Kortex"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities" "ApplicationDescription" "Kortex Browser"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities" "ApplicationIcon" "$INSTDIR\Kortex.exe,0"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\URLAssociations" "http" "KortexURL"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\URLAssociations" "https" "KortexURL"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\FileAssociations" ".htm" "KortexHTML"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\FileAssociations" ".html" "KortexHTML"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\FileAssociations" ".xhtml" "KortexHTML"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\FileAssociations" ".pdf" "KortexHTML"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\Capabilities\FileAssociations" ".svg" "KortexHTML"
+  WriteRegStr SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex\shell\open\command" "" '"$INSTDIR\Kortex.exe"'
+  WriteRegStr SHELL_CONTEXT "Software\RegisteredApplications" "Kortex" "Software\Clients\StartMenuInternet\Kortex\Capabilities"
+  WriteRegDWORD SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.html\OpenWithProgids" "KortexHTML" 0
+  WriteRegDWORD SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.htm\OpenWithProgids" "KortexHTML" 0
+  WriteRegDWORD SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.xhtml\OpenWithProgids" "KortexHTML" 0
+  WriteRegDWORD SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\OpenWithProgids" "KortexHTML" 0
+  WriteRegDWORD SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.svg\OpenWithProgids" "KortexHTML" 0
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexURL" "" "Kortex URL"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexURL" "URL Protocol" ""
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexURL\DefaultIcon" "" "$INSTDIR\Kortex.exe,0"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexURL\shell\open\command" "" '"$INSTDIR\Kortex.exe" "%1"'
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexHTML" "" "Kortex Document"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexHTML\DefaultIcon" "" "$INSTDIR\Kortex.exe,0"
+  WriteRegStr SHELL_CONTEXT "Software\Classes\KortexHTML\shell\open\command" "" '"$INSTDIR\Kortex.exe" "%1"'
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
+!macroend
+
+!macro customUnInstall
+  ${ifNot} ${isUpdated}
+    DeleteRegKey SHELL_CONTEXT "Software\Clients\StartMenuInternet\Kortex"
+    DeleteRegValue SHELL_CONTEXT "Software\RegisteredApplications" "Kortex"
+    DeleteRegKey SHELL_CONTEXT "Software\Classes\KortexURL"
+    DeleteRegKey SHELL_CONTEXT "Software\Classes\KortexHTML"
+    DeleteRegValue SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.html\OpenWithProgids" "KortexHTML"
+    DeleteRegValue SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.htm\OpenWithProgids" "KortexHTML"
+    DeleteRegValue SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.xhtml\OpenWithProgids" "KortexHTML"
+    DeleteRegValue SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\OpenWithProgids" "KortexHTML"
+    DeleteRegValue SHELL_CONTEXT "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.svg\OpenWithProgids" "KortexHTML"
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
+  ${endIf}
+!macroend
+
+--- FIM DO FICHEIRO: build\installer.nsh ---

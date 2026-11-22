@@ -1,0 +1,21 @@
+'use strict';
+// Preload limpo. Botão K Contas e temas removidos.
+
+/* KORTEX-NO-PASSKEY: bloqueia o popup de passkey/chave de seguranca do Windows */
+try {
+  require('electron').webFrame.executeJavaScript(`(function(){
+    try {
+      var deny = function(){ return Promise.reject(new DOMException('The operation either timed out or was not allowed.', 'NotAllowedError')); };
+      if (navigator.credentials) {
+        var c = navigator.credentials;
+        var og = c.get ? c.get.bind(c) : null, oc = c.create ? c.create.bind(c) : null;
+        c.get = function(o){ return (o && o.publicKey) ? deny() : (og ? og(o) : Promise.resolve(null)); };
+        c.create = function(o){ return (o && o.publicKey) ? deny() : (oc ? oc(o) : Promise.resolve(null)); };
+      }
+      if (window.PublicKeyCredential) {
+        PublicKeyCredential.isConditionalMediationAvailable = function(){ return Promise.resolve(false); };
+        PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function(){ return Promise.resolve(false); };
+      }
+    } catch (e) {}
+  })();`);
+} catch (e) {}

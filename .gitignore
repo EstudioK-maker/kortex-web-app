@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+google-accounts.json
+*_dump*.txt
+*dump_part*.txt
+*KORTEX_CLAUDE_EVAL*.txt
+ENVIAR_PARA_CLAUDE.txt
+FICHEIROS_KORTEX_PARA_CLAUDE.txt
+main.js

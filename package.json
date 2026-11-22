@@ -1,0 +1,66 @@
+{
+    "name": "kortex",
+    "version": "1.0.47",
+    "description": "Kortex Browser",
+    "main": "src/main/main.js",
+    "dependencies": {
+        "adm-zip": "^0.6.1",
+        "electron-chrome-extensions": "^4.10.0",
+        "electron-updater": "^6.8.11",
+        "tldts": "^7.4.19"
+    },
+    "build": {
+        "appId": "com.kortex.browser",
+        "productName": "Kortex",
+        "directories": {
+            "output": "dist"
+        },
+        "electronDist": "node_modules/electron/dist",
+        "asar": true,
+        "compression": "maximum",
+        "electronLanguages": [
+            "en-US",
+            "pt-PT",
+            "pt-BR"
+        ],
+        "files": [
+            "package.json",
+            "src/**/*",
+            "assets/**/*",
+            "resources/**/*",
+            "!**/*.map",
+            "!**/*.d.ts",
+            "!src/**/*.{bak,old,log}",
+            "!src/**/*backup*/**",
+            "!src/**/*Backup*/**"
+        ],
+        "win": {
+            "target": "nsis",
+            "artifactName": "Kortex-Setup.${ext}",
+            "signAndEditExecutable": false
+        },
+        "publish": [
+            {
+                "provider": "github",
+                "owner": "EstudioK-maker",
+                "repo": "kortex-web-app",
+                "releaseType": "release"
+            }
+        ],
+        "nsis": {
+            "oneClick": true,
+            "perMachine": false,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true,
+            "allowToChangeInstallationDirectory": false,
+            "deleteAppDataOnUninstall": false,
+            "include": "build/installer.nsh"
+        },
+        "afterPack": "build/afterPack.js"
+    },
+    "devDependencies": {
+        "electron": "github:castlabs/electron-releases#v45.2.1+wvcus",
+        "electron-builder": "^24.13.3",
+        "resedit": "^3.1.1"
+    }
+}

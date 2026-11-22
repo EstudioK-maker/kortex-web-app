@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <title>Companheiros IA - Kortex</title>
+  <style>
+    body { background-color: #0f1011; color: #fff; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 40px; display: flex; flex-direction: column; align-items: center; }
+    .container { max-width: 800px; width: 100%; }
+    h1 { font-size: 28px; margin-bottom: 8px; font-weight: 600; }
+    p.subtitle { color: #888; font-size: 15px; margin-bottom: 30px; }
+    
+    .card { background: #1a1b1d; border: 1px solid #2a2a30; border-radius: 12px; padding: 24px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; transition: transform 0.2s, box-shadow 0.2s; }
+    .card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.4); border-color: #3f3f4a; }
+    
+    .card-info h3 { margin: 0 0 6px 0; font-size: 18px; color: #ff8a3d; }
+    .card-info p { margin: 0; font-size: 14px; color: #aaa; line-height: 1.4; }
+    .card-info .status { display: inline-block; margin-top: 10px; font-size: 11px; background: #2a2a35; padding: 4px 8px; border-radius: 4px; color: #ccc; text-transform: uppercase; letter-spacing: 0.5px; }
+    
+    .btn-new { background: #ff5722; color: #fff; border: none; padding: 12px 24px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; display: flex; align-items: center; gap: 8px; }
+    .btn-new:hover { background: #e64a19; }
+    
+    .btn-del { background: transparent; color: #ff4444; border: 1px solid #ff4444; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+    .btn-del:hover { background: #ff4444; color: #fff; }
+
+    /* Modal */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); align-items: center; justify-content: center; z-index: 1000; }
+    .modal { background: #1a1b1d; border: 1px solid #333; border-radius: 16px; width: 400px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.6); }
+    .modal h2 { margin-top: 0; font-size: 20px; font-weight: 600; }
+    .input-group { margin-bottom: 16px; }
+    .input-group label { display: block; font-size: 12px; color: #aaa; margin-bottom: 6px; }
+    .input-group input, .input-group textarea { width: 100%; background: #0f1011; border: 1px solid #333; color: #fff; padding: 10px; border-radius: 8px; box-sizing: border-box; outline: none; font-family: inherit; }
+    .input-group input:focus, .input-group textarea:focus { border-color: #ff5722; }
+    
+    .modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+    .btn-cancel { background: transparent; border: none; color: #888; cursor: pointer; font-size: 14px; }
+    .btn-cancel:hover { color: #fff; }
+    .btn-save { background: #ff5722; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; }
+    .btn-save:hover { background: #e64a19; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Companheiros IA</h1>
+    <p class="subtitle">Agentes persistentes que trabalham para si.</p>
+    
+    <div id="agents-list" style="margin-bottom: 24px;">
+      <!-- Agentes serao inseridos aqui via JS -->
+    </div>
+    
+    <button class="btn-new" id="btn-create">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+      Criar novo companheiro
+    </button>
+  </div>
+
+  <!-- Modal de Criacao -->
+  <div class="modal-overlay" id="modal-create">
+    <div class="modal">
+      <h2>Criar Companheiro IA</h2>
+      <div class="input-group">
+        <label>Nome do Companheiro</label>
+        <input type="text" id="agent-name" placeholder="Ex: Pesquisador de Mercado">
+      </div>
+      <div class="input-group">
+        <label>Função</label>
+        <input type="text" id="agent-role" placeholder="Ex: Monitor, Assistente, Pesquisador">
+      </div>
+      <div class="input-group">
+        <label>Objetivo Principal</label>
+        <textarea id="agent-goal" rows="3" placeholder="O que deve ele fazer? Ex: Procurar novidades sobre inteligência artificial."></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="btn-cancel">Cancelar</button>
+        <button class="btn-save" id="btn-save">Criar Companheiro</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Assim que a pagina abre, carrega os agentes
+    const listEl = document.getElementById('agents-list');
+    const modal = document.getElementById('modal-create');
+    
+    async function loadAgents() {
+      if (!window.kortex || !window.kortex.agents) return;
+      const agents = await window.kortex.agents.list();
+      
+      if (agents.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center;padding:40px;color:#555;border:1px dashed #333;border-radius:12px;">Nenhum companheiro criado ainda.</div>';
+        return;
+      }
+      
+      listEl.innerHTML = '';
+      agents.forEach(agent => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="card-info">
+            <h3>${agent.name}</h3>
+            <p>${agent.role} — ${agent.goal}</p>
+            <span class="status">${agent.status}</span>
+          </div>
+          <button class="btn-del" onclick="deleteAgent('${agent.id}')">Excluir</button>
+        `;
+        listEl.appendChild(card);
+      });
+    }
+
+    window.deleteAgent = async (id) => {
+      if (!confirm('Tens a certeza que queres excluir este companheiro?')) return;
+      await window.kortex.agents.delete(id);
+      loadAgents();
+    };
+
+    // Modal Logic
+    document.getElementById('btn-create').onclick = () => { modal.style.display = 'flex'; };
+    document.getElementById('btn-cancel').onclick = () => { modal.style.display = 'none'; };
+
+    document.getElementById('btn-save').onclick = async () => {
+      const name = document.getElementById('agent-name').value.trim();
+      const role = document.getElementById('agent-role').value.trim();
+      const goal = document.getElementById('agent-goal').value.trim();
+      
+      if (!name) return alert('O nome do companheiro é obrigatório.');
+      
+      const btn = document.getElementById('btn-save');
+      btn.innerText = 'A criar...';
+      
+      await window.kortex.agents.create({ name, role, goal });
+      
+      document.getElementById('agent-name').value = '';
+      document.getElementById('agent-role').value = '';
+      document.getElementById('agent-goal').value = '';
+      
+      modal.style.display = 'none';
+      btn.innerText = 'Criar Companheiro';
+      loadAgents();
+    };
+
+    // Inicia
+    loadAgents();
+  </script>
+</body>
+</html>

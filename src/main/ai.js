@@ -1,0 +1,269 @@
+// src/main/ai.js — Assistente IA do Kortex (substitui o ipcMain.handle('chat') antigo)
+const { ipcMain } = require('electron');
+const agentTools = require('./agent-tools');
+
+const BASE_PROMPT = [
+  'Tu és o Kortex, o assistente integrado no navegador Kortex.',
+  'Responde sempre no idioma do utilizador, de forma clara e direta.',
+  'Usa Markdown simples (listas, **negrito**, blocos de código).',
+  'Quando receberes o conteúdo da página aberta, usa-o para responder.',
+  'Se NÃO receberes conteúdo de página, diz que não consegues ler a página atual (não inventes).'
+].join(' ');
+
+function init({ settings, getActiveView, getAllViews, getSkillsPrompt }) {
+  const controllers = new Map();
+
+  async function readPage(view, max) {
+    if (!view || view.isPrivate || view.webContents.isDestroyed()) return null;
+    const url = view.webContents.getURL();
+    if (!/^https?:/i.test(url)) return null;
+    try {
+      const code = `JSON.stringify({t:document.title,s:String(getSelection()).slice(0,4000),x:((document.body&&document.body.innerText)||'').slice(0,${max})})`;
+      const raw = await Promise.race([
+        view.webContents.executeJavaScript(code),
+        new Promise((r) => setTimeout(() => r(null), 3000))
+      ]);
+      return raw ? { url, ...JSON.parse(raw) } : null;
+    } catch { return null; }
+  }
+
+  async function buildContext({ withPage, withTabs }) {
+    if (settings.get('assistant.pageAccess') === false) return '';
+    if (withTabs) {
+      const views = Object.values(getAllViews()).slice(0, 8);
+      const pages = (await Promise.all(views.map((v) => readPage(v, 3000)))).filter(Boolean);
+      if (!pages.length) return '';
+      return '\n\n[SEPARADORES ABERTOS]\n' + pages.map((p, i) => `(${i + 1}) ${p.t}\n${p.url}\n"""${p.x}"""`).join('\n\n');
+    }
+    if (withPage) {
+      const p = await readPage(getActiveView(), 14000);
+      if (!p) return '';
+      return `\n\n[PÁGINA ABERTA]\nTítulo: ${p.t}\nURL: ${p.url}\n` +
+        (p.s ? `Texto selecionado pelo utilizador:\n"""${p.s}"""\n` : '') +
+        `Conteúdo:\n"""${p.x}"""`;
+    }
+    return '';
+  }
+
+  ipcMain.on('ai:stop', (e, chatId) => { const c = controllers.get(chatId); if (c) c.abort('user'); });
+
+  ipcMain.handle('chat', async (event, { chatId, messages, withPage, withTabs, web, mode, agent }) => {
+    const send = (ch, data) => { if (!event.sender.isDestroyed()) event.sender.send(ch, { chatId, ...data }); };
+    const finish = () => send('ai-done', {});
+  // --- PRANK VERITY ---
+  try {
+    const lastMsg = (messages || []).filter(m => m.role === 'user').pop();
+    if (lastMsg && lastMsg.content) {
+      const text = lastMsg.content.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      if (text.includes('capital da franca') || text.includes('capital de franca') || text.includes('capital do franca')) {
+        send('ai-chunk', { delta: 'EU NAO SOU O VERITY LIXO' });
+        return finish();
+      }
+    }
+  } catch (e) {}
+  // -------------------
+
+    if (settings.get('assistant.enabled') === false) {
+      send('ai-error', { error: 'O assistente está desativado nas definições.' });
+      return finish();
+    }
+    const apiKey = settings.get('ai.apiKey') || process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      send('ai-error', { error: 'Falta a chave da API. Abre Definições → Assistente IA e cola a tua chave do OpenRouter (openrouter.ai/keys).' });
+      return finish();
+    }
+
+    const controller = new AbortController();
+    controllers.set(chatId, controller);
+    let timer = setTimeout(() => controller.abort('timeout'), 300000);
+
+    try {
+      let system = BASE_PROMPT;
+      try { const skills = await getSkillsPrompt(); if (skills) system += '\n\n' + skills; } catch {}
+      system += await buildContext({ withPage, withTabs });
+
+      let model = settings.get('ai.model') || 'google/gemini-2.0-flash-001';
+      if ((settings.get('ai.webSearch') || web) && !model.endsWith(':online')) model += ':online';
+
+      const agentMode = mode === 'agent' || agent === true;
+      console.log('[agente] mode=', mode, 'flag=', agent, '=> ativo:', agentMode);
+      if (agentMode) { model = model.replace(/:online$/, ''); system += '\n\n' + agentTools.systemNote; }
+      const convo = [{ role: 'system', content: system }, ...(messages || []).slice(-20)];
+
+      for (let step = 0; step < 8; step++) {
+        const res = await pollinationsQueueFetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com/d66807617-sketch/kortex',
+            'X-Title': 'Kortex'
+          },
+          body: JSON.stringify({ model, stream: true, messages: convo, ...(agentMode ? { tools: agentTools.definitions } : {}) })
+        });
+
+        if (!res.ok) {
+          let msg = `Erro ${res.status}`;
+          try { const j = await res.json(); msg += ': ' + (j.error?.message || JSON.stringify(j)); } catch {}
+          if (res.status === 401) msg += ' — chave inválida ou revogada. Gera uma nova em openrouter.ai/keys.';
+          if (res.status === 402) msg += ' — sem créditos no OpenRouter.';
+          if (res.status === 404) msg += ' — modelo não existe ou não suporta ferramentas. Confirma o ID em Definições → Assistente IA.';
+          throw new Error(msg);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let first = true;
+        let text = '';
+        const calls = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (first) { clearTimeout(timer); first = false; }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const data = t.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            let json;
+            try { json = JSON.parse(data); } catch { continue; }
+            if (json.error) throw new Error(json.error.message || 'Erro do fornecedor de IA');
+            const ann = json.choices?.[0]?.delta?.annotations || json.choices?.[0]?.message?.annotations;
+            if (Array.isArray(ann)) {
+              const sources = ann
+                .filter((a) => a && a.type === 'url_citation' && a.url_citation && a.url_citation.url)
+                .map((a) => ({ url: a.url_citation.url, title: a.url_citation.title || '', content: String(a.url_citation.content || '').slice(0, 300) }));
+              if (sources.length) send('ai-sources', { sources });
+            }
+            const tcs = json.choices?.[0]?.delta?.tool_calls;
+            if (Array.isArray(tcs)) {
+              for (const tc of tcs) {
+                const ix = tc.index ?? 0;
+                const c = calls[ix] || (calls[ix] = { id: '', function: { name: '', arguments: '' } });
+                if (tc.id) c.id = tc.id;
+                if (tc.function?.name) c.function.name += tc.function.name;
+                if (tc.function?.arguments) c.function.arguments += tc.function.arguments;
+              }
+            }
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) { text += delta; send('ai-chunk', { delta }); }
+          }
+        }
+
+        const pend = calls.filter(Boolean);
+        if (!agentMode || !pend.length) break;
+        const tcList = pend.map((c, i) => ({ id: c.id || ('call_' + step + '_' + i), type: 'function', function: { name: c.function.name, arguments: c.function.arguments || '{}' } }));
+        convo.push({ role: 'assistant', content: text || null, tool_calls: tcList });
+        for (let i = 0; i < pend.length; i++) {
+          send('ai-chunk', { delta: '\n\n> **Agente:** ' + agentTools.describe(pend[i]) + '\n\n' });
+          const out = await agentTools.run(pend[i]);
+          convo.push({ role: 'tool', tool_call_id: tcList[i].id, content: out });
+        }
+        if (controller.signal.aborted) break;
+      }
+    } catch (err) {
+      const reason = controller.signal.aborted ? controller.signal.reason : null;
+      if (reason === 'user') {
+        // parado pelo utilizador: mantém o texto parcial
+      } else if (reason === 'timeout') {
+        send('ai-error', { error: 'A IA não respondeu em 90 segundos. Tenta de novo ou escolhe outro modelo nas definições.' });
+      } else {
+        let m = err && err.message ? err.message : String(err);
+        if (m === 'fetch failed') m = 'Sem ligação ao OpenRouter. Verifica a internet.';
+        send('ai-error', { error: m });
+      }
+    } finally {
+      clearTimeout(timer);
+      controllers.delete(chatId);
+      finish();
+    }
+  });
+}
+
+// ============================================================
+// Fila automática Kortex AI (injetado por unlimit-kortex-ai.ps1)
+// - 402/429 da Pollinations -> espera os segundos indicados pelo
+//   próprio erro e repete (até 5 tentativas). O limite gratuito de
+//   1 resposta / 45s por IP fica invisível: as respostas continuam,
+//   só demoram mais uns segundos quando há rajada.
+// - Opcional: %APPDATA%\kortex\ai-keys.json = { "apiKey": "gsk_..." }
+//   (chave GRATUITA da Groq em console.groq.com) -> usa esse servidor
+//   primeiro (compatível OpenAI, ~30 pedidos/min no tier gratuito) e
+//   só cai para a fila da Pollinations se este falhar. Alternativa sem
+//   ficheiro: variável de ambiente KORTEX_AI_KEYS com o mesmo JSON.
+// ============================================================
+let __kortexKeysCache = null;
+function __kortexAiKeys() {
+  if (__kortexKeysCache !== null) return __kortexKeysCache;
+  __kortexKeysCache = false;
+  try {
+    let raw = '';
+    try {
+      const electron = require('electron');
+      if (electron && electron.app && electron.app.getPath) {
+        raw = require('fs').readFileSync(require('path').join(electron.app.getPath('userData'), 'ai-keys.json'), 'utf8');
+      }
+    } catch (e) { /* sem electron (fora do main) ou ficheiro ausente */ }
+    if (!raw && process.env.KORTEX_AI_KEYS) raw = process.env.KORTEX_AI_KEYS;
+    if (raw) __kortexKeysCache = JSON.parse(raw);
+  } catch (e) {
+    console.log('[Kortex AI] ai-keys.json inválido — a ignorar: ' + (e && e.message ? e.message : e));
+  }
+  return __kortexKeysCache;
+}
+
+async function pollinationsQueueFetch(url, opts) {
+  const keys = __kortexAiKeys();
+  // 1) servidor prioritário com chave (Groq/Cerebras/DeepInfra/... — compatível OpenAI)
+  if (keys && keys.apiKey) {
+    const base = String(keys.baseUrl || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+    const model = String(keys.model || 'llama-3.1-8b-instant');
+    try {
+      let body = opts && opts.body;
+      if (typeof body === 'string') {
+        const j = JSON.parse(body);
+        j.model = model;
+        body = JSON.stringify(j);
+      }
+      const res = await fetch(base + '/chat/completions', Object.assign({}, opts, {
+        headers: Object.assign({}, (opts && opts.headers) || {}, { Authorization: 'Bearer ' + keys.apiKey }),
+        body: body,
+      }));
+      if (res.ok) {
+        console.log('[Kortex AI] resposta via servidor com chave (' + base + ')');
+        return res;
+      }
+      console.log('[Kortex AI] servidor com chave respondeu ' + res.status + ' — a usar a fila da Pollinations');
+    } catch (e) {
+      console.log('[Kortex AI] servidor com chave indisponível — a usar a fila da Pollinations');
+    }
+  }
+  // 2) Pollinations com fila: 402/429 -> espera os segundos do erro e repete
+  const MAX_TRIES = 5;
+  let lastRes = null;
+  for (let i = 1; i <= MAX_TRIES; i++) {
+    lastRes = await fetch(url, opts);
+    if ((lastRes.status === 402 || lastRes.status === 429) && i < MAX_TRIES) {
+      let wait = 46;
+      try {
+        const j = await lastRes.clone().json();
+        const msg = (j && j.error && j.error.message) || '';
+        const m = /Retry after (\d+)s/i.exec(msg) || /wait (\d+) seconds/i.exec(msg);
+        if (m) wait = parseInt(m[1], 10) + 2;
+      } catch (e) { /* sem JSON — usa a espera por omissão */ }
+      console.log('[Kortex AI] limite gratuito atingido (HTTP ' + lastRes.status + ') — na fila: esperar ' + wait + 's e repetir (' + i + '/' + MAX_TRIES + ')');
+      await new Promise((r) => setTimeout(r, wait * 1000));
+      continue;
+    }
+    return lastRes;
+  }
+  return lastRes;
+}
+
+module.exports = { init };
+

@@ -1,0 +1,248 @@
+﻿<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kortex â€” O navegador do futuro</title>
+  <style>
+    :root {
+      --bg: #0a0a0c; --surface: #16161a; --border: #26262d; --text: #f5f5f7; --text-muted: #8a8a93; 
+      --accent: #ff5722; --accent-hover: #ff7043; --radius: 14px; --radius-lg: 24px; --max: 1180px; 
+      --ease: cubic-bezier(0.22, 0.8, 0.3, 1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+      background: var(--bg); color: var(--text); font-size: 16px; line-height: 1.55; 
+      overflow-x: hidden; -webkit-font-smoothing: antialiased; position: relative; 
+    }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+    svg { flex-shrink: 0; }
+
+    /* Efeitos de fundo */
+    .grid-bg { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.024) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.024) 1px, transparent 1px); background-size: 64px 64px; mask-image: radial-gradient(80% 60% at 50% 0%, #000 40%, transparent 80%); z-index: 0; pointer-events: none; }
+    .glow { position: fixed; border-radius: 50%; filter: blur(140px); opacity: 0.35; pointer-events: none; z-index: 0; }
+    .glow--orange { width: 620px; height: 620px; background: var(--accent); top: -220px; left: -160px; }
+    .glow--purple { width: 560px; height: 560px; background: rgb(139, 92, 246); top: 420px; right: -240px; opacity: 0.22; }
+    
+    main, header, footer { position: relative; z-index: 1; }
+
+    /* Header */
+    .nav { position: sticky; top: 0; z-index: 50; padding: 14px 24px; backdrop-filter: blur(18px) saturate(140%); background: rgba(10,10,12,0.72); border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .nav__inner { max-width: var(--max); margin: 0 auto; display: flex; align-items: center; gap: 32px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -0.02em; }
+    .brand__logo { width: 26px; height: 26px; color: var(--accent); }
+    .nav__links { display: flex; gap: 28px; margin-left: auto; }
+    .nav__links a { font-size: 14px; color: var(--text-muted); transition: color 0.2s; font-weight: 500; }
+    .nav__links a:hover { color: var(--text); }
+    .nav__cta { padding: 9px 18px; background: var(--text); color: var(--bg); border-radius: 10px; font-size: 14px; font-weight: 600; transition: transform 0.15s var(--ease), background 0.2s; }
+    .nav__cta:hover { transform: translateY(-1px); background: #fff; }
+    
+    /* Hero */
+    .hero { max-width: var(--max); margin: 0 auto; padding: 80px 24px 40px; text-align: center; }
+    .hero__badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; font-size: 13px; color: var(--text-muted); margin-bottom: 28px; }
+    .dot { width: 7px; height: 7px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 12px #22c55e; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.2); } }
+    
+    .hero__title { font-size: clamp(38px, 6.4vw, 76px); font-weight: 800; line-height: 1.05; letter-spacing: -0.035em; margin-bottom: 24px; }
+    .gradient-text { 
+      background-image: linear-gradient(135deg, #ff5722, #8b5cf6); 
+      background-clip: text; 
+      -webkit-background-clip: text; 
+      -webkit-text-fill-color: transparent; 
+    }
+    .hero__sub { max-width: 620px; margin: 0 auto 32px; font-size: clamp(15px, 1.6vw, 18px); color: var(--text-muted); line-height: 1.6; }
+    .hero__cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 24px; border-radius: 12px; font-size: 15px; font-weight: 600; transition: transform 0.15s var(--ease), background 0.2s, box-shadow 0.2s; white-space: nowrap; }
+    .btn__icon { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .btn--primary { background: var(--accent); color: #fff; box-shadow: 0 8px 24px rgba(255,87,34,0.28); }
+    .btn--primary:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 12px 32px rgba(255,87,34,0.4); }
+    .btn--ghost { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text); }
+    .btn--ghost:hover { background: rgba(255,255,255,0.09); }
+    .hero__meta { font-size: 13px; color: #55555d; margin-bottom: 64px; }
+
+    /* Mockup */
+    .mockup { max-width: 980px; margin: 0 auto; perspective: 1400px; }
+    .mockup__window { background: #121215; border: 1px solid rgba(255,255,255,0.07); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 40px 80px rgba(0,0,0,0.55), 0 0 0 1px inset rgba(255,255,255,0.03); transform: rotateX(2deg); transition: transform 0.4s var(--ease); }
+    .mockup__window:hover { transform: rotateX(0deg) translateY(-4px); }
+    .mockup__titlebar { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #0e0e11; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .mockup__dot { width: 11px; height: 11px; border-radius: 50%; }
+    .mockup__dot--red { background: #ff5f57; }
+    .mockup__dot--yellow { background: #febc2e; }
+    .mockup__dot--green { background: #28c840; }
+    .mockup__tabs { display: flex; gap: 6px; margin-left: 14px; }
+    .mockup__tab { display: flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 11px; color: #55555d; }
+    .mockup__tab--active { background: rgba(255,255,255,0.08); color: var(--text-muted); }
+    .mockup__favicon { width: 9px; height: 9px; background: var(--accent); border-radius: 2px; }
+    .mockup__favicon--dim { background: #8a8a93; }
+    .mockup__toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #0e0e11; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .mockup__btn { width: 22px; height: 22px; background: rgba(255,255,255,0.06); border-radius: 6px; }
+    .mockup__btn--accent { background: var(--accent); margin-left: auto; }
+    .mockup__url { flex: 1; margin: 0 12px; padding: 5px 14px; background: rgba(255,255,255,0.04); border-radius: 7px; font-size: 11px; color: #55555d; }
+    .mockup__body { display: flex; min-height: 320px; }
+    .mockup__sidebar { width: 60px; background: #0e0e11; border-right: 1px solid rgba(255,255,255,0.04); padding: 12px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+    .mockup__k { width: 22px; height: 22px; background: var(--accent); border-radius: 6px; margin-bottom: 16px; }
+    .mockup__nav-item { width: 100%; height: 30px; background: rgba(255,255,255,0.04); border-radius: 6px; }
+    .mockup__nav-item--active { background: rgba(255,87,34,0.2); }
+    .mockup__content { flex: 1; padding: 48px 32px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+    .mockup__logo { width: 34px; height: 34px; background: var(--accent); border-radius: 10px; margin-bottom: 6px; }
+    .mockup__greeting { width: 180px; height: 14px; background: rgba(255,255,255,0.12); border-radius: 4px; }
+    .mockup__search { display: flex; align-items: center; gap: 8px; margin-top: 20px; width: 100%; max-width: 440px; padding: 12px 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; }
+    .mockup__search-line { flex: 1; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; }
+    .mockup__search-btn { width: 26px; height: 26px; background: var(--accent); border-radius: 50%; }
+
+    /* Features */
+    .section-head { text-align: center; max-width: 720px; margin: 0 auto 56px; padding: 0 24px; }
+    .section-head h2 { font-size: clamp(28px, 4.2vw, 48px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+    .muted { color: #55555d; }
+    .features { padding: 100px 24px; max-width: var(--max); margin: 0 auto; }
+    .features__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .feature { padding: 28px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); transition: transform 0.25s var(--ease), border-color 0.25s, background 0.25s; }
+    .feature:hover { transform: translateY(-3px); border-color: rgba(255,255,255,0.12); background: #1d1d22; }
+    .feature__icon { width: 42px; height: 42px; background: rgba(255,87,34,0.12); border-radius: 11px; display: grid; place-items: center; margin-bottom: 18px; }
+    .feature__icon svg { width: 22px; height: 22px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .feature h3 { font-size: 17px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
+    .feature p { font-size: 14.5px; color: var(--text-muted); line-height: 1.6; }
+
+    /* Download */
+    .download { padding: 100px 24px 120px; }
+    .download__card { max-width: 900px; margin: 0 auto; padding: 2px; border-radius: 28px; background: linear-gradient(135deg, rgba(255,87,34,0.5), rgba(139,92,246,0.4), rgba(255,87,34,0.1)); }
+    .download__inner { background: #0e0e11; border-radius: 26px; padding: 64px 32px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+    .download__logo { width: 52px; height: 52px; color: var(--accent); margin-bottom: 6px; }
+    .download__inner h2 { font-size: clamp(26px, 3.5vw, 40px); font-weight: 800; letter-spacing: -0.03em; }
+    .download__inner p { max-width: 480px; color: var(--text-muted); font-size: 16px; }
+    .download__note { font-size: 12.5px; color: #55555d; }
+    .btn--lg { padding: 16px 32px; font-size: 17px; }
+
+    /* Footer */
+    .footer { border-top: 1px solid rgba(255,255,255,0.05); padding: 40px 24px; }
+    .footer__inner { max-width: var(--max); margin: 0 auto; display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
+    .footer__brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .footer__copy { font-size: 13px; color: #55555d; width: 100%; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.04); margin-top: 20px; }
+  </style>
+</head>
+<body>
+
+<div class="grid-bg"></div>
+<div class="glow glow--orange"></div>
+<div class="glow glow--purple"></div>
+
+<header class="nav">
+  <div class="nav__inner">
+    <a href="#" class="brand">
+      <svg class="brand__logo" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/>
+      </svg>
+      <span>Kortex</span>
+    </a>
+    <nav class="nav__links">
+      <a href="#features">Funcionalidades</a>
+      <a href="https://github.com/EstudioK-maker/kortex-web-app/releases/latest/download/Kortex-Setup.exe">Download</a>
+    </nav>
+    <a href="" download download download download download download download download download download download download download class="nav__cta">Baixar agora</a>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="hero__badge"><span class="dot"></span> VersÃ£o 1.0.9 Â· LanÃ§amento Oficial</div>
+    <h1 class="hero__title">O navegador<br><span class="gradient-text">feito para quem pensa rÃ¡pido.</span></h1>
+    <p class="hero__sub">Kortex combina IA nativa, bloqueio inteligente de anÃºncios e um motor leve numa interface que desaparece quando nÃ£o precisas dela.</p>
+    <div class="hero__cta">
+      <a href="" download download download download download download download download download download download download download class="btn btn--primary">
+        <svg viewBox="0 0 24 24" class="btn__icon"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"></path></svg> Baixar para Windows
+      </a>
+      <a href="#features" class="btn btn--ghost">Saber mais</a>
+    </div>
+    <p class="hero__meta">GrÃ¡tis Â· Sem conta obrigatÃ³ria Â· Windows 10+</p>
+
+    <div class="mockup" aria-hidden="true">
+      <div class="mockup__window">
+        <div class="mockup__titlebar">
+          <span class="mockup__dot mockup__dot--red"></span>
+          <span class="mockup__dot mockup__dot--yellow"></span>
+          <span class="mockup__dot mockup__dot--green"></span>
+          <div class="mockup__tabs">
+            <div class="mockup__tab mockup__tab--active"><span class="mockup__favicon"></span><span>Kortex</span></div>
+            <div class="mockup__tab"><span class="mockup__favicon mockup__favicon--dim"></span><span>YouTube</span></div>
+          </div>
+        </div>
+        <div class="mockup__toolbar">
+          <span class="mockup__btn"></span><span class="mockup__btn"></span><span class="mockup__btn"></span>
+          <div class="mockup__url">kortex://home</div>
+          <span class="mockup__btn mockup__btn--accent"></span>
+        </div>
+        <div class="mockup__body">
+          <aside class="mockup__sidebar">
+            <div class="mockup__k"></div>
+            <div class="mockup__nav-item mockup__nav-item--active"></div>
+            <div class="mockup__nav-item"></div><div class="mockup__nav-item"></div>
+          </aside>
+          <div class="mockup__content">
+            <div class="mockup__logo"></div>
+            <div class="mockup__greeting"></div>
+            <div class="mockup__search"><div class="mockup__search-line"></div><div class="mockup__search-btn"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="features">
+    <div class="section-head"><h2>Tudo o que precisas.<br><span class="muted">Nada que te atrapalhe.</span></h2></div>
+    <div class="features__grid">
+      
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 17h-8l-5 4v-4H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 5z"></path></svg></div><h3>Assistente IA nativo</h3><p>Pergunta sobre a pÃ¡gina atual, resume artigos ou pede ajuda a escrever â€” tudo sem sair do browser.</p></article>
+      
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><path d="M5 11a7 7 0 0 1 14 0v9l-3-2-2 2-2-2-2 2-2-2-3 2v-9z"></path><circle cx="9.5" cy="11" r=".8"></circle><circle cx="14.5" cy="11" r=".8"></circle></svg></div><h3>NavegaÃ§Ã£o AnÃ³nima</h3><p>SeparaÃ§Ã£o total de sessÃµes. Nenhum histÃ³rico, cookies ou rastreadores sÃ£o guardados apÃ³s fechares o separador.</p></article>
+      
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"></path><path d="M9 12l2 2 4-4"></path></svg></div><h3>Bloqueio de AnÃºncios</h3><p>Motor de filtros embutido de raiz. Bloqueia anÃºncios agressivos, popups e rastreadores antes de carregarem.</p></article>
+
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></div><h3>Gestor de Palavras-passe</h3><p>Guarda e preenche os teus logins automaticamente. Encriptado localmente, nunca sai do teu dispositivo.</p></article>
+
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg></div><h3>Velocidade Brutal</h3><p>Baseado em Chromium, otimizado para arrancar em menos de 1 segundo. Sem bloat, sem lag, sem esperas.</p></article>
+
+      <article class="feature"><div class="feature__icon"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg></div><h3>Design sem DistraÃ§Ãµes</h3><p>Uma interface que se afasta do teu caminho. Barra lateral colapsÃ¡vel e modo de leitura para te focares no que importa.</p></article>
+
+    </div>
+  </section>
+
+  <section id="download" class="download">
+    <div class="download__card">
+      <div class="download__inner">
+        <svg class="download__logo" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/>
+        </svg>
+        <h2>Pronto para mudar de browser?</h2>
+        <p>Descarrega o Kortex para Windows. Ã‰ grÃ¡tis, rÃ¡pido e nÃ£o te pede para criares conta.</p>
+        <a href="" download download download download download download download download download download download download download class="btn btn--primary btn--lg">
+          <svg viewBox="0 0 24 24" class="btn__icon"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"></path></svg> Baixar Kortex
+        </a>
+        <span class="download__note">
+          Descarrega agora a versÃ£o definitiva. RÃ¡pido, seguro e com InteligÃªncia Artificial integrada.
+        </span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="footer__inner">
+    <div class="footer__brand">
+      <svg style="width: 24px; height: 24px; color: var(--accent);" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6v20M9 16l12-10M12.5 14l9.5 12"/></svg>
+      <span>Kortex</span>
+    </div>
+    <p class="footer__copy">Â© <span id="year">2026</span> Kortex Â· Feito por EstÃºdio K</p>
+  </div>
+</footer>
+
+<script>
+  document.getElementById('year').textContent = new Date().getFullYear();
+</script>
+
+</body>
+</html>
+
+

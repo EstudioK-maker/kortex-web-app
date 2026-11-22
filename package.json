@@ -54,7 +54,8 @@
             "createStartMenuShortcut": true,
             "allowToChangeInstallationDirectory": false,
             "deleteAppDataOnUninstall": false,
-            "include": "build/installer.nsh"
+            "include": "build/installer.nsh",
+            "warningsAsErrors": false
         },
         "afterPack": "build/afterPack.js"
     },
